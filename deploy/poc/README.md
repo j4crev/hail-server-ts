@@ -508,3 +508,25 @@ rejected before signing. Bob then revoked the Grant, published the tombstone
 to Alice, and rejected a previously signed second envelope without accepting
 new work; the first message remained delivered. The Grant is now terminally
 revoked. Both provider containers remained healthy with zero restarts.
+
+Migration 12 and single-use reply capabilities were deployed on 2026-09-28
+from provider source `63d3188` and protocol guide `1d3253d`. Both provider
+databases were backed up and the custom-format dumps checked at
+`/var/backups/hail-poc/pre-reply-20260928T171842Z`; the prior provider image
+was tagged `hail-server-ts:pre-reply-20260928T171842Z`. The deployed provider
+image is `sha256:18a415d5ce77f97308643a427b8c2cf31f7af89012ea699a58d550ae594b7db3`.
+
+Bob's fresh Grant `01a0e908-a1ae-77ab-802d-052ef09727f5` converged with
+HTTP `201` and remains active. Alice's new signed original envelope
+`01a0e909-54d0-70df-959c-fc5b4201ac09` invited Bob's DID to reply until
+Unix second `1793208073`; Bob accepted and delivered the original. Bob then
+prepared and concurrently submitted two distinct replies without an Alice-to-
+Bob Grant. Alice accepted and delivered only
+`01a0e90a-a0d8-7a21-bfe1-3a4487024d47`; the competing
+`01a0e90a-79c8-75e0-83a1-83b63b487dca` received generic `202` and was
+durably rejected with no delivery work. Alice consumed the invitation for the
+accepted reply, pushed signed terminal revision 2 to Bob, and received HTTP
+`204` in one attempt. Bob retained `delivered` revision 2; repeating the exact
+reply returned that status without a second delivery. Alice could not reply
+again because Bob's reply did not invite further continuation. Both providers
+are healthy with zero restarts, and their databases are at migration 12.

@@ -141,8 +141,8 @@ explicitly invite one further reply. The original sender serializes the
 single-use claim before accepting a reply, consumes it on delivery, and
 releases it after terminal failure or cancellation. The full phase and its
 limitations are in the sibling POC guide. The already-demonstrated public
-Grant is revoked and its signed envelope did not invite replies; this phase
-has not been deployed to the public providers.
+Grant is revoked and its signed envelope did not invite replies; the current
+public reply demonstration and new Grant are recorded in `deploy/poc/README.md`.
 
 To test the local PostgreSQL reply lifecycle against a disposable database:
 
