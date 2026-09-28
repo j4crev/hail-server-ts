@@ -43,6 +43,11 @@ const migrations: readonly Migration[] = [
     name: "sender-profiles",
     url: new URL("../../migrations/0006_sender_profiles.sql", import.meta.url),
   },
+  {
+    version: 7,
+    name: "grants",
+    url: new URL("../../migrations/0007_grants.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

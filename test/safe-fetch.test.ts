@@ -1,4 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
+import { Readable } from "node:stream";
+import { describe, expect, it, vi } from "vitest";
+
+const { httpsRequest } = vi.hoisted(() => ({ httpsRequest: vi.fn() }));
+
+vi.mock("node:https", () => ({ request: httpsRequest }));
+
 import { isPublicAddress, SafeHttpsTransport } from "../src/discovery/safe-fetch.js";
 
 describe("isPublicAddress", () => {
@@ -26,6 +33,69 @@ describe("isPublicAddress", () => {
 });
 
 describe("SafeHttpsTransport", () => {
+  it("forwards an allowed PUT and its body to the pinned HTTPS connection", async () => {
+    let options: Record<string, unknown> | undefined;
+    let sentBody: Uint8Array | undefined;
+    httpsRequest.mockImplementationOnce((requestOptions, callback) => {
+      options = requestOptions as Record<string, unknown>;
+      const outgoing = new EventEmitter() as EventEmitter & {
+        end(body?: Uint8Array): void;
+        destroy(error?: Error): void;
+      };
+      outgoing.end = (body?: Uint8Array) => {
+        sentBody = body;
+        outgoing.emit("socket", { once: (_event: string, listener: () => void) => listener() });
+        const incoming = Readable.from([]) as Readable & {
+          rawHeaders: string[];
+          statusCode: number;
+          statusMessage: string;
+        };
+        incoming.rawHeaders = ["ETag", "\"result\""];
+        incoming.statusCode = 204;
+        incoming.statusMessage = "No Content";
+        callback(incoming);
+      };
+      outgoing.destroy = (error?: Error) => {
+        if (error) outgoing.emit("error", error);
+      };
+      return outgoing;
+    });
+    const transport = new SafeHttpsTransport({
+      async lookup() {
+        return [{ address: "1.1.1.1", family: 4 }];
+      },
+    });
+    const body = new Uint8Array([1, 2, 3]);
+
+    const result = await transport.fetch(
+      new Request("https://example.com/hail/grants/id", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/cose;cose-type=cose-sign1",
+          "If-None-Match": "*",
+          "Cache-Control": "no-store",
+        },
+        body,
+      }),
+    );
+
+    expect(result.status).toBe(204);
+    expect(result.headers.get("etag")).toBe('"result"');
+    expect(options).toMatchObject({
+      hostname: "example.com",
+      path: "/hail/grants/id",
+      method: "PUT",
+      family: 4,
+      servername: "example.com",
+      headers: expect.objectContaining({
+        "Content-Length": "3",
+        "content-type": "application/cose;cose-type=cose-sign1",
+        "if-none-match": "*",
+      }),
+    });
+    expect(sentBody).toEqual(body);
+  });
+
   it("rejects a hostname if any DNS answer is non-public before connecting", async () => {
     const transport = new SafeHttpsTransport({
       async lookup() {

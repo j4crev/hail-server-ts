@@ -207,6 +207,51 @@ Profile creation is idempotent for unchanged authoring content and the current
 messaging key. Changed content or a key rotation creates the next immutable
 revision.
 
+Create Bob's `updates` Grant for Alice from Bob's provider:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec hail-dev \
+  bun run grant:create -- \
+  bob@hailproto.dev alice@hailproto.app examples/bob-to-alice-grant.json
+```
+
+The command prints the canonical UUIDv7 Grant ID and revision digest. Creation,
+consent evidence retention, and the publication outbox entry commit atomically.
+The `hail-dev` server worker claims due entries every five seconds, resolves
+Alice's current PLC service, and conditionally publishes the exact signed bytes
+to `PUT /hail/grants/{grant_id}`. To request one immediate due attempt:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec hail-dev \
+  bun run grant:publish -- --once
+```
+
+Inspect both databases without printing private key material:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec dev-db \
+  psql -U hail -d hail -c \
+  'SELECT grant_id, local_role, current_revision, current_status FROM grant_lineages;'
+docker compose --env-file .env -f compose.yaml exec app-db \
+  psql -U hail -d hail -c \
+  'SELECT grant_id, local_role, current_revision, current_status FROM grant_lineages;'
+```
+
+Both sides should show revision `1` and status `active`. The dev row has local
+role `grantor`; the app row has local role `grantee`. Publication retries remain
+durable across process and host restarts.
+
+To demonstrate terminal revocation, run on Bob's provider:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec hail-dev \
+  bun run grant:revoke -- bob@hailproto.dev <grant-id>
+```
+
+The local row becomes revoked before notification. After publication, both
+providers show revision `2` and status `revoked`. Repeating the revoke command
+returns the existing tombstone without creating another revision.
+
 ## IPv6
 
 After IPv4 activation succeeds, configure the VPS's static IPv6 address and
@@ -237,7 +282,11 @@ docker compose --env-file .env -f compose.yaml down
 
 Never use `down --volumes` on the deployed POC. The named volumes contain the
 PLC operation log, provider identities, encrypted private keys, bindings, and
-protocol state. VPS snapshots are useful but do not replace tested PostgreSQL
+protocol state, including Grant tombstones and publication attempts. Migration
+7 is append-only and has no destructive down migration. Rollback after applying
+it means restoring a tested pre-migration logical backup or continuing with the
+new schema; do not edit an applied migration or delete Grant rows. VPS snapshots
+are useful but do not replace tested PostgreSQL
 logical backups or an independent encrypted copy of `.env`.
 
 ## Current POC

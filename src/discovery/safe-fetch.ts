@@ -42,12 +42,29 @@ export class SafeHttpsTransport {
   }
 
   readonly fetch: DiscoveryFetch = async (request) => {
-    if (request.method !== "GET") throw new Error("Safe discovery transport only permits GET");
+    if (request.method !== "GET" && request.method !== "PUT") {
+      throw new Error("Safe HTTPS transport only permits GET and PUT");
+    }
     const url = new URL(request.url);
     this.validateUrl(url);
     for (const name of ["authorization", "cookie", "referer"]) {
       if (request.headers.has(name)) throw new Error(`Discovery request must not send ${name}`);
     }
+    const allowedHeaders =
+      request.method === "GET"
+        ? new Set(["accept", "accept-encoding", "if-none-match"])
+        : new Set([
+            "accept-encoding",
+            "cache-control",
+            "content-type",
+            "if-match",
+            "if-none-match",
+          ]);
+    for (const name of request.headers.keys()) {
+      if (!allowedHeaders.has(name)) throw new Error(`Safe HTTPS request has forbidden header ${name}`);
+    }
+    const requestBody =
+      request.method === "PUT" ? new Uint8Array(await request.arrayBuffer()) : undefined;
 
     const addresses = await this.resolve(url.hostname, request.signal);
     if (
@@ -70,8 +87,11 @@ export class SafeHttpsTransport {
           hostname: url.hostname,
           port: url.port ? Number(url.port) : 443,
           path: `${url.pathname}${url.search}`,
-          method: "GET",
-          headers: Object.fromEntries(request.headers),
+          method: request.method,
+          headers: {
+            ...Object.fromEntries(request.headers),
+            ...(requestBody ? { "Content-Length": String(requestBody.length) } : {}),
+          },
           agent: false,
           family: selected.family,
           servername: url.hostname,
@@ -86,10 +106,15 @@ export class SafeHttpsTransport {
             const value = incoming.rawHeaders[index + 1];
             if (name !== undefined && value !== undefined) headers.append(name, value);
           }
-          const body = Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>;
+          const status = incoming.statusCode ?? 500;
+          const hasBody = ![101, 204, 205, 304].includes(status);
+          if (!hasBody) incoming.resume();
+          const body = hasBody
+            ? (Readable.toWeb(incoming) as unknown as ReadableStream<Uint8Array>)
+            : null;
           resolve(
             new Response(body, {
-              status: incoming.statusCode ?? 500,
+              status,
               statusText: incoming.statusMessage ?? "",
               headers,
             }),
@@ -120,7 +145,7 @@ export class SafeHttpsTransport {
           { once: true },
         );
       }
-      outgoing.end();
+      outgoing.end(requestBody);
     });
   };
 

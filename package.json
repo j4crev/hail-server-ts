@@ -13,8 +13,12 @@
     "onboard": "bun src/cli/onboard.ts",
     "profile:create": "bun src/cli/create-profile.ts",
     "profile:verify": "bun src/cli/verify-profile.ts",
+    "grant:create": "bun src/cli/create-grant.ts",
+    "grant:revoke": "bun src/cli/revoke-grant.ts",
+    "grant:publish": "bun src/cli/publish-grants.ts",
     "server": "bun src/index.ts",
     "test": "vitest run",
+    "test:integration": "bun --bun vitest run test/grant-repository.integration.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

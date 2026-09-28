@@ -332,6 +332,16 @@ export class OnboardingRepository
     return accountFromRow(rows[0]);
   }
 
+  async getAccountByDid(did: string): Promise<AccountRecord | null> {
+    const rows = await this.sql<AccountRow[]>`
+      SELECT id, tenant_id, canonical_address, did, onboarding_state,
+             activation_attempt_id, activation_verification_mode
+      FROM provider_accounts
+      WHERE did = ${did}
+    `;
+    return rows[0] ? accountFromRow(rows[0]) : null;
+  }
+
   async getGenesis(accountId: string): Promise<GenesisEvidence> {
     const rows = await this.sql<EvidenceRow[]>`
       SELECT id, did, operation_cid, registry_origin, signed_operation_bytes,

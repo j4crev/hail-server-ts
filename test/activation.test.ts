@@ -56,6 +56,9 @@ function verifiedAddress(overrides: Partial<VerifiedAddress> = {}): VerifiedAddr
     did: account.did!,
     serviceBase: "https://hailproto.app/hail",
     messagingDidKey: "did:key:zMessaging",
+    identityDidKey: "did:key:zIdentity",
+    plcEvidence: { document: {}, data: {}, log: [] },
+    verifiedAt: new Date("2026-09-27T00:00:00Z"),
     binding: {
       version: 1,
       type: "hail.address-binding",

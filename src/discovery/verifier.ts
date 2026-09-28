@@ -9,6 +9,7 @@ import { canonicalizeHailAddress } from "../identity/address.js";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { PlcDirectoryClient } from "../plc/client.js";
 import { PlcHailDidResolver } from "../plc/resolver.js";
+import type { PlcResolutionEvidence } from "../plc/resolver.js";
 import { ADDRESS_BINDING_REL, COSE_SIGN1_MEDIA_TYPE } from "./routes.js";
 import { parseJsonWithoutDuplicateKeys } from "./strict-json.js";
 
@@ -23,6 +24,9 @@ export interface VerifiedAddress {
   did: string;
   serviceBase: string;
   messagingDidKey: string;
+  identityDidKey: string;
+  plcEvidence: PlcResolutionEvidence;
+  verifiedAt: Date;
   binding: HailAddressBinding;
   representation: Uint8Array;
   digest: Uint8Array;
@@ -165,11 +169,15 @@ export class AddressVerifier {
     }
     const representation = await responseBytes(bindingResponse, MAX_BINDING_BYTES);
     const inspected = await this.resolveAndVerifyBinding(address, representation);
+    const verifiedAt = this.now();
     return {
       address,
       did: inspected.binding.did,
       serviceBase: inspected.serviceBase,
       messagingDidKey: inspected.messagingDidKey,
+      identityDidKey: inspected.identityDidKey,
+      plcEvidence: inspected.plcEvidence,
+      verifiedAt,
       binding: inspected.binding,
       representation,
       digest: new Uint8Array(createHash("sha256").update(representation).digest()),
@@ -200,9 +208,17 @@ export class AddressVerifier {
   private async resolveAndVerifyBinding(
     address: string,
     representation: Uint8Array,
-  ): Promise<{ binding: HailAddressBinding; serviceBase: string; messagingDidKey: string }> {
+  ): Promise<{
+    binding: HailAddressBinding;
+    serviceBase: string;
+    messagingDidKey: string;
+    identityDidKey: string;
+    plcEvidence: PlcResolutionEvidence;
+  }> {
     let resolvedServiceBase: string | undefined;
     let resolvedMessagingDidKey: string | undefined;
+    let resolvedIdentityDidKey: string | undefined;
+    let plcEvidence: PlcResolutionEvidence | undefined;
     const inspected = await verifySignedPayload(
       "hail.address-binding",
       representation,
@@ -214,6 +230,8 @@ export class AddressVerifier {
         }
         resolvedServiceBase = resolved.serviceBase;
         resolvedMessagingDidKey = resolved.messagingDidKey;
+        resolvedIdentityDidKey = resolved.identityDidKey;
+        plcEvidence = resolved.evidence;
         return ed25519PublicKeyFromDidKey(resolved.identityDidKey);
       }),
     );
@@ -223,13 +241,15 @@ export class AddressVerifier {
     if (binding.issued_at > current + 300 || current > binding.expires_at + 300) {
       throw new Error("Address Binding is outside its validity period");
     }
-    if (!resolvedServiceBase || !resolvedMessagingDidKey) {
+    if (!resolvedServiceBase || !resolvedMessagingDidKey || !resolvedIdentityDidKey || !plcEvidence) {
       throw new Error("PLC state did not resolve complete Hail service state");
     }
     return {
       binding,
       serviceBase: resolvedServiceBase,
       messagingDidKey: resolvedMessagingDidKey,
+      identityDidKey: resolvedIdentityDidKey,
+      plcEvidence,
     };
   }
 }

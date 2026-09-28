@@ -4,6 +4,8 @@ import { registerDiscoveryRoutes } from "./discovery/routes.js";
 import type { DiscoveryStore } from "./discovery/store.js";
 import { registerSenderProfileRoutes } from "./profiles/routes.js";
 import type { SenderProfileStore } from "./profiles/store.js";
+import { registerGrantRoutes } from "./grants/routes.js";
+import type { GrantReceiver } from "./grants/receiver.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -13,6 +15,7 @@ export interface AppDependencies {
   checkReadiness(): Promise<ReadinessResult>;
   discoveryStore?: DiscoveryStore;
   senderProfileStore?: SenderProfileStore;
+  grantReceiver?: GrantReceiver;
 }
 
 const defaultDependencies: AppDependencies = {
@@ -32,6 +35,9 @@ export function createApp(
   }
   if (dependencies.senderProfileStore) {
     registerSenderProfileRoutes(app, dependencies.senderProfileStore);
+  }
+  if (dependencies.grantReceiver) {
+    registerGrantRoutes(app, config.hailServiceBase, dependencies.grantReceiver);
   }
 
   app.get("/health/live", (context) =>

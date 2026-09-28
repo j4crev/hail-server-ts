@@ -25,7 +25,7 @@ server.
 ```bash
 bun run db:migrate
 bun run typecheck
-bun test
+bun run test
 bun run dev
 ```
 
@@ -81,3 +81,42 @@ HTTPS transport with:
 ```bash
 bun run profile:verify -- did:plc:aaaaaaaaaaaaaaaaaaaaaaaa
 ```
+
+After both accounts have public activation evidence and the grantee's Sender
+Profile verifies, create or idempotently reuse a signed Grant:
+
+```bash
+bun run grant:create -- \
+  bob@hailproto.dev \
+  alice@hailproto.app \
+  examples/bob-to-alice-grant.json
+```
+
+Grant creation retains the exact verified Address Binding, Sender Profile, and
+PLC evidence in the same transaction as immutable revision 1. It also creates a
+durable publication outbox entry. The server checks that outbox every five
+seconds; an operator can trigger one due attempt directly with:
+
+```bash
+bun run grant:publish -- --once
+```
+
+Revoke an authoritative Grant with a terminal signed revision:
+
+```bash
+bun run grant:revoke -- bob@hailproto.dev <grant-id>
+```
+
+Local revocation commits before publication and immediately remains
+authoritative even if the remote notification needs retries. A revoked Grant ID
+cannot become active again.
+
+Run the PostgreSQL repository integration test against a disposable migrated
+database with:
+
+```bash
+DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail \
+  bun run test:integration
+```
+
+The integration test skips when `DATABASE_URL` is absent.
