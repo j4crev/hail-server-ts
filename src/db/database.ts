@@ -48,6 +48,26 @@ const migrations: readonly Migration[] = [
     name: "grants",
     url: new URL("../../migrations/0007_grants.sql", import.meta.url),
   },
+  {
+    version: 8,
+    name: "detached-bodies",
+    url: new URL("../../migrations/0008_detached_bodies.sql", import.meta.url),
+  },
+  {
+    version: 9,
+    name: "envelopes",
+    url: new URL("../../migrations/0009_envelopes.sql", import.meta.url),
+  },
+  {
+    version: 10,
+    name: "delivery-work",
+    url: new URL("../../migrations/0010_delivery_work.sql", import.meta.url),
+  },
+  {
+    version: 11,
+    name: "delivery-status",
+    url: new URL("../../migrations/0011_delivery_status.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

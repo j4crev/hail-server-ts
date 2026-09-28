@@ -141,4 +141,30 @@ describe("SafeHttpsTransport", () => {
       ),
     ).rejects.toThrow();
   });
+
+  it("permits bearer credentials only on pinned canonical body GET requests", async () => {
+    let options: Record<string, unknown> | undefined;
+    httpsRequest.mockImplementationOnce((requestOptions, callback) => {
+      options = requestOptions as Record<string, unknown>;
+      const outgoing = new EventEmitter() as EventEmitter & { end(): void; destroy(error?: Error): void };
+      outgoing.end = () => {
+        const incoming = Readable.from([]) as Readable & { rawHeaders: string[]; statusCode: number };
+        incoming.rawHeaders = [];
+        incoming.statusCode = 404;
+        callback(incoming);
+      };
+      outgoing.destroy = (error?: Error) => { if (error) outgoing.emit("error", error); };
+      return outgoing;
+    });
+    const transport = new SafeHttpsTransport({ async lookup() { return [{ address: "1.1.1.1", family: 4 }]; } });
+    const path = `https://example.com/hail/bodies/${"A".repeat(43)}`;
+    const headers = { Authorization: `Bearer ${"B".repeat(43)}` };
+    expect((await transport.fetchBody(new Request(path, { headers }))).status).toBe(404);
+    expect(options).toMatchObject({ hostname: "example.com", path: `/hail/bodies/${"A".repeat(43)}`,
+      method: "GET", headers: expect.objectContaining({ authorization: headers.Authorization }) });
+    await expect(transport.fetchBody(new Request(`${path}?token=secret`, { headers }))).rejects.toThrow();
+    await expect(transport.fetchBody(new Request("https://example.com/other", { headers }))).rejects.toThrow();
+    await expect(transport.fetchBody(new Request(path, { headers: { Authorization: "Bearer bad" } }))).rejects.toThrow();
+    await expect(transport.fetch(new Request(path, { headers }))).rejects.toThrow("must not send authorization");
+  });
 });

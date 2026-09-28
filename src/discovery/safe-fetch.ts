@@ -41,16 +41,25 @@ export class SafeHttpsTransport {
     this.validateTarget = (url) => this.validateUrl(url);
   }
 
-  readonly fetch: DiscoveryFetch = async (request) => {
-    if (request.method !== "GET" && request.method !== "PUT") {
-      throw new Error("Safe HTTPS transport only permits GET and PUT");
+  readonly fetch: DiscoveryFetch = (request) => this.send(request, false);
+  readonly fetchBody: DiscoveryFetch = (request) => this.send(request, true);
+
+  private async send(request: Request, bodyRetrieval: boolean): Promise<Response> {
+    if (request.method !== "GET" && request.method !== "PUT" && request.method !== "POST") {
+      throw new Error("Safe HTTPS transport only permits GET, PUT and POST");
     }
     const url = new URL(request.url);
     this.validateUrl(url);
-    for (const name of ["authorization", "cookie", "referer"]) {
+    if (bodyRetrieval && (request.method !== "GET" ||
+      !/^\/(?:[A-Za-z0-9._~-]+\/)*bodies\/[A-Za-z0-9_-]{43}$/.test(url.pathname) || url.search)) {
+      throw new Error("Body retrieval requires the canonical body GET operation");
+    }
+    for (const name of ["cookie", "referer", ...(bodyRetrieval ? [] : ["authorization"])]) {
       if (request.headers.has(name)) throw new Error(`Discovery request must not send ${name}`);
     }
-    const allowedHeaders =
+    const allowedHeaders = bodyRetrieval
+      ? new Set(["accept", "accept-encoding", "authorization"])
+      :
       request.method === "GET"
         ? new Set(["accept", "accept-encoding", "if-none-match"])
         : new Set([
@@ -63,8 +72,11 @@ export class SafeHttpsTransport {
     for (const name of request.headers.keys()) {
       if (!allowedHeaders.has(name)) throw new Error(`Safe HTTPS request has forbidden header ${name}`);
     }
+    if (bodyRetrieval && !/^Bearer [A-Za-z0-9_-]{43}$/.test(request.headers.get("authorization") ?? "")) {
+      throw new Error("Body retrieval requires a canonical bearer credential");
+    }
     const requestBody =
-      request.method === "PUT" ? new Uint8Array(await request.arrayBuffer()) : undefined;
+      request.method !== "GET" ? new Uint8Array(await request.arrayBuffer()) : undefined;
 
     const addresses = await this.resolve(url.hostname, request.signal);
     if (
@@ -147,7 +159,7 @@ export class SafeHttpsTransport {
       }
       outgoing.end(requestBody);
     });
-  };
+  }
 
   private resolve(
     hostname: string,

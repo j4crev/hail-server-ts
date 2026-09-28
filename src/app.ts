@@ -6,6 +6,13 @@ import { registerSenderProfileRoutes } from "./profiles/routes.js";
 import type { SenderProfileStore } from "./profiles/store.js";
 import { registerGrantRoutes } from "./grants/routes.js";
 import type { GrantReceiver } from "./grants/receiver.js";
+import { registerBodyRoutes } from "./bodies/routes.js";
+import type { BodyStore } from "./bodies/service.js";
+import { registerEnvelopeRoutes } from "./envelopes/routes.js";
+import type { EnvelopeReceiver } from "./envelopes/receiver.js";
+import type { DeliveryStatusSigner } from "./delivery/status.js";
+import { registerDeliveryStatusRoutes } from "./delivery/status-routes.js";
+import type { DeliveryStatusReceiver } from "./delivery/status-receiver.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -16,6 +23,10 @@ export interface AppDependencies {
   discoveryStore?: DiscoveryStore;
   senderProfileStore?: SenderProfileStore;
   grantReceiver?: GrantReceiver;
+  bodyStore?: BodyStore;
+  envelopeReceiver?: EnvelopeReceiver;
+  deliveryStatusSigner?: DeliveryStatusSigner;
+  deliveryStatusReceiver?: DeliveryStatusReceiver;
 }
 
 const defaultDependencies: AppDependencies = {
@@ -39,6 +50,9 @@ export function createApp(
   if (dependencies.grantReceiver) {
     registerGrantRoutes(app, config.hailServiceBase, dependencies.grantReceiver);
   }
+  if (dependencies.bodyStore) registerBodyRoutes(app, dependencies.bodyStore);
+  if (dependencies.envelopeReceiver) registerEnvelopeRoutes(app, dependencies.envelopeReceiver, dependencies.deliveryStatusSigner);
+  if (dependencies.deliveryStatusReceiver) registerDeliveryStatusRoutes(app, dependencies.deliveryStatusReceiver);
 
   app.get("/health/live", (context) =>
     context.json({

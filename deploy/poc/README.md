@@ -252,6 +252,100 @@ The local row becomes revoked before notification. After publication, both
 providers show revision `2` and status `revoked`. Repeating the revoke command
 returns the existing tombstone without creating another revision.
 
+## Detached-Body And Delivery Rollout
+
+The envelope and status slice adds forward-only provider migrations 8 through
+11. Back up **both** provider databases before replacing either provider. From
+`/opt/hail-poc/hail-server-ts/deploy/poc` on the VPS, as the administrator:
+
+```bash
+backup=/var/backups/hail-poc/pre-delivery-$(date -u +%Y%m%dT%H%M%SZ)
+install -d -m 0700 "$backup"
+docker compose --env-file .env -f compose.yaml exec -T app-db \
+  pg_dump -U hail -d hail -Fc > "$backup/app.dump"
+docker compose --env-file .env -f compose.yaml exec -T dev-db \
+  pg_dump -U hail -d hail -Fc > "$backup/dev.dump"
+chmod 0600 "$backup"/*.dump
+docker compose --env-file .env -f compose.yaml exec -T app-db \
+  pg_restore --list < "$backup/app.dump" >/dev/null
+docker compose --env-file .env -f compose.yaml exec -T dev-db \
+  pg_restore --list < "$backup/dev.dump" >/dev/null
+```
+
+Confirm both nonempty dumps and a clean `pg_restore --list` result before the
+rollout. The provider startup migrates under a PostgreSQL advisory lock. Build
+the single shared provider image, replace both instances, and verify both
+report healthy. Do not edit migrations that have already been applied.
+
+```bash
+docker compose --env-file .env -f compose.yaml config --quiet
+docker compose --env-file .env -f compose.yaml build hail-app
+docker compose --env-file .env -f compose.yaml up -d --no-deps hail-app hail-dev
+docker compose --env-file .env -f compose.yaml ps
+docker compose --env-file .env -f compose.yaml exec -T app-db \
+  psql -U hail -d hail -Atc 'SELECT max(version) FROM schema_migrations;'
+docker compose --env-file .env -f compose.yaml exec -T dev-db \
+  psql -U hail -d hail -Atc 'SELECT max(version) FROM schema_migrations;'
+```
+
+Both migration queries must print `11`. Check HTTPS readiness from outside the
+VPS and examine provider logs for startup or publisher errors before sending.
+Migration rollback requires restoration from the pre-rollout dumps; merely
+replacing the image does not undo committed schema or messages.
+
+For the end-to-end demonstration, create a **new** Bob-to-Alice Grant, because
+the earlier example Grant is terminally revoked. Use the Grant creation and
+publication commands above and wait until both provider databases show the
+same new Grant ID with revision 1 and `active`. Set `grant_id` to that new
+UUIDv7, `body_digest` to the digest printed by the first command below, and
+`message_id` to the UUIDv7 printed by the second command. Use Alice's provider:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec hail-app \
+  bun run body:publish -- did:plc:rewawq7tylmrzaaprd27sdhb examples/alice-body.txt
+docker compose --env-file .env -f compose.yaml exec hail-app \
+  bun run envelope:create -- did:plc:rewawq7tylmrzaaprd27sdhb \
+  "$grant_id" "$body_digest" updates
+docker compose --env-file .env -f compose.yaml exec hail-app \
+  bun run envelope:submit -- did:plc:rewawq7tylmrzaaprd27sdhb "$message_id"
+```
+
+The envelope command atomically persists the signed bytes and a hashed bearer
+authorization before submission. No separate `body:authorize` command is
+needed. A `200` signed `accepted` status confirms Bob's durable acceptance;
+`202 received` is indeterminate. Retry `envelope:submit` with the **same**
+message ID after an ambiguous result, never create a replacement envelope
+merely because the transport response was lost. Bob's in-process delivery and
+terminal-status workers run every five seconds; the single-claim commands
+`bun run delivery:once` and `bun run status:publish` are available for an
+immediate due attempt.
+
+Inspect status without printing stored COSE bytes or bearer credentials:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec -T dev-db \
+  psql -U hail -d hail -c \
+  'SELECT sender_did, message_id, state, reason, status_revision FROM delivery_work;'
+docker compose --env-file .env -f compose.yaml exec -T dev-db \
+  psql -U hail -d hail -c \
+  'SELECT message_id, delivered_at FROM delivered_messages;'
+docker compose --env-file .env -f compose.yaml exec -T dev-db \
+  psql -U hail -d hail -c \
+  'SELECT message_id, state, attempt_count, last_http_status FROM terminal_status_publications;'
+docker compose --env-file .env -f compose.yaml exec -T app-db \
+  psql -U hail -d hail -c \
+  'SELECT message_id, current_state, current_revision, revision_gap FROM sent_delivery_status;'
+```
+
+Expected: Bob stores one delivered message, his delivery state reaches
+`delivered`, terminal publication is `acknowledged` with HTTP `204`, and Alice
+retains the matching signed `delivered` snapshot. Repeating the same envelope
+submission must not create another delivery. Test an out-of-scope category and
+invalid signature without exposing other tenants' relationship state; a
+revocation-first submission must not enter `accepted`, while a previously
+accepted envelope keeps delivery responsibility. Record actual results and
+commit IDs in the protocol implementation log.
+
 ## IPv6
 
 After IPv4 activation succeeds, configure the VPS's static IPv6 address and
