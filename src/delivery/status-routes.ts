@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import { isCoseSign1MediaType } from "../http/media-type.js";
 import type { DeliveryStatusReceiver } from "./status-receiver.js";
+import { ProtectedResponseSchedule } from "../http/protected-schedule.js";
 
 const DIGEST_PATH = /^\/hail\/deliveries\/([A-Za-z0-9_-]{43})$/;
 
@@ -15,7 +16,8 @@ function generic(): Response {
     headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
 }
 
-export function registerDeliveryStatusRoutes(app: Hono, receiver: Pick<DeliveryStatusReceiver, "receive">): void {
+export function registerDeliveryStatusRoutes(app: Hono, receiver: Pick<DeliveryStatusReceiver, "receive">,
+  schedule = new ProtectedResponseSchedule()): void {
   let windowStart = Date.now();
   let count = 0;
   app.all("/hail/deliveries/*", async (context) => {
@@ -50,13 +52,13 @@ export function registerDeliveryStatusRoutes(app: Hono, receiver: Pick<DeliveryS
       let offset = 0;
       for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
     } catch { return problem(400, "Bad Request"); }
-    const scheduled = new Promise<null>((resolve) => setTimeout(() => resolve(null), 750));
-    const completed = receiver.receive(match[1], bytes).catch(() => "unknown" as const);
-    const result = await Promise.race([completed, scheduled]);
-    await scheduled;
-    if (result === "acknowledged") return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
-    if (result === "conflict") return problem(409, "Conflict");
-    if (result === "bad-request") return problem(400, "Bad Request");
+    const result = await schedule.run((signal) => receiver.receive(match[1]!, bytes, signal));
+    if (result.kind === "busy") return problem(429, "Too Many Requests", { "Retry-After": "1" });
+    if (result.kind === "detailed") {
+      if (result.value === "acknowledged") return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+      if (result.value === "conflict") return problem(409, "Conflict");
+      if (result.value === "bad-request") return problem(400, "Bad Request");
+    }
     return generic();
   });
 }

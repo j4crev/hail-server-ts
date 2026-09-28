@@ -4,6 +4,7 @@ import type { EnvelopeReceiver } from "./receiver.js";
 import { inspectSignedPayload } from "@hailproto/codec";
 import { COSE_SIGN1_MEDIA_TYPE } from "../discovery/routes.js";
 import type { DeliveryStatusSigner } from "../delivery/status.js";
+import { ProtectedResponseSchedule } from "../http/protected-schedule.js";
 
 const MAX_BYTES = 16_384;
 
@@ -34,7 +35,8 @@ async function requestBytes(request: Request): Promise<Uint8Array | null> {
 }
 
 export function registerEnvelopeRoutes(app: Hono, receiver: Pick<EnvelopeReceiver, "receive">,
-  signer?: Pick<DeliveryStatusSigner, "signCurrent">): void {
+  signer?: Pick<DeliveryStatusSigner, "signCurrent">,
+  schedule = new ProtectedResponseSchedule()): void {
   let started = Date.now();
   let count = 0;
   app.all("/hail/envelopes", async (context) => {
@@ -49,15 +51,17 @@ export function registerEnvelopeRoutes(app: Hono, receiver: Pick<EnvelopeReceive
     try { bytes = await requestBytes(context.req.raw); }
     catch { return problem(400, "Bad Request"); }
     if (!bytes) return problem(413, "Content Too Large");
-    const scheduled = new Promise<null>((resolve) => setTimeout(() => resolve(null), 750));
-    const processing = receiver.receive(bytes).then(async (outcome) => {
+    const result = await schedule.run(async (signal) => {
+      const outcome = await receiver.receive(bytes, signal);
       if (!signer || !["accepted", "duplicate"].includes(outcome)) return null;
+      signal.throwIfAborted();
       const envelope = inspectSignedPayload("hail.envelope", bytes).payload;
-      return signer.signCurrent(envelope.from, envelope.message_id);
-    }).catch(() => null);
-    const snapshot = await Promise.race([processing, scheduled]);
-    await scheduled;
-    if (snapshot) return new Response(Uint8Array.from(snapshot), { status: 200,
+      const snapshot = await signer.signCurrent(envelope.from, envelope.message_id);
+      signal.throwIfAborted();
+      return snapshot;
+    });
+    if (result.kind === "busy") return problem(429, "Too Many Requests", { "Retry-After": "1" });
+    if (result.kind === "detailed") return new Response(Uint8Array.from(result.value), { status: 200,
       headers: { "Content-Type": COSE_SIGN1_MEDIA_TYPE, "Cache-Control": "no-store" } });
     return new Response('{"outcome":"received"}', {
       status: 202,

@@ -426,6 +426,44 @@ rollback after migration 12 requires reconciliation of any reply records
 created since the upgrade; restore from the pre-reply dumps for a full
 rollback.
 
+## Protected-Response And PLC-Read Hardening Rollout
+
+This slice makes **no schema change**: both databases should remain at
+migration 12. It shares one bounded work budget across envelope and status
+receivers and replaces unbounded private PLC reads with a five-second
+cancellable request/stream deadline, a 1 MiB decoded response limit, strict
+JSON parsing, and no redirects. The pinned official client still performs
+exact PLC operation submission. The 750 ms protected response floor is
+provisional; the implementation and measurement limits are documented in
+Phase 12 of the sibling POC guide.
+
+Before replacing either provider, save fresh custom-format dumps of **both**
+provider databases and verify them with `pg_restore --list` using the backup
+commands above, choosing a new `pre-hardening-<UTC timestamp>` directory. Tag
+the currently deployed provider image for rollback. Build the single shared
+image, replace `hail-app` and `hail-dev`, and confirm both become healthy with
+zero restarts. Verify both HTTPS readiness URLs, the private PLC health and
+read-back of Alice's and Bob's DIDs, and unchanged migration version `12`.
+
+Retry an existing signed Alice-to-Bob envelope and the accepted Bob-to-Alice
+reply by their **original message IDs** using `envelope:submit`. Each should
+return the previously signed `delivered` snapshot with no additional delivered
+message or status revision. Repeat protected malformed/missing-relationship
+requests with fixed, bounded sample counts; compare exact generic `202`
+status, headers, JSON body, and response times. Do not print or store signed
+representations, bearer credentials, or provider `.env` values in timing logs.
+The local test suite covers stalled PLC headers and streams, oversized and
+ambiguous JSON responses, and late validation after the processing deadline;
+the private PLC server is not intentionally stalled during the public smoke
+test. Compare measured timing distributions to the recorded pre-rollout
+baseline, then inspect provider logs and work-queue state.
+
+Because this slice adds no migration, restoring the tagged prior provider
+image is an image-only runtime rollback. Keep the pre-rollout logical backups
+as independent recovery evidence. A complete response-floor calibration under
+sustained load, source-network limits, write timeout policy, and fenced
+provider migration remain separate hardening work.
+
 ## IPv6
 
 After IPv4 activation succeeds, configure the VPS's static IPv6 address and

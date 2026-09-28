@@ -34,6 +34,7 @@ integration("envelope acceptance with PostgreSQL", () => {
   let store: EnvelopeRepository;
   let receiver: EnvelopeReceiver;
   let privateKey: CryptoKey;
+  let statusMessageId: string;
   let keyDid: string;
   let resolver: HailDidResolver;
   let encryptor: KeyEncryptor;
@@ -298,6 +299,7 @@ integration("envelope acceptance with PostgreSQL", () => {
   it("signs acceptance and converges a terminal push at Alice with idempotent acknowledgement", async () => {
     const body = await new BodyRepository(db.sql).publish(alice, bodyFromText("Signed status round trip"));
     const value = payload();
+    statusMessageId = value.message_id;
     value.body.digest.value = body.digest;
     value.body.size = body.bytes.length;
     const envelope = await signed(value);
@@ -379,6 +381,52 @@ integration("envelope acceptance with PostgreSQL", () => {
       ...failedPayload, revision: 3,
     }, createWebCryptoSigner(`${bob}#hail-messaging`, privateKey));
     expect(await aliceReceiver.receive(path, later)).toBe("conflict");
+  });
+
+  it("re-signs the same terminal payload after messaging-key rotation without changing its revision", async () => {
+    const wrappers = await db.sql<{ cose: Uint8Array; signing_public_key: string }[]>`
+      SELECT cose, signing_public_key FROM delivery_status_wrappers
+      WHERE sender_did = ${alice} AND message_id = ${statusMessageId} AND revision = 2
+    `;
+    expect(wrappers).toHaveLength(1);
+    expect(wrappers[0]?.signing_public_key).toBe(keyDid);
+    const previous = inspectSignedPayload("hail.delivery-status", wrappers[0]!.cose);
+    const newPair = (await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"])) as CryptoKeyPair;
+    const newKeyBytes = new Uint8Array(34);
+    newKeyBytes.set([0xed, 0x01]);
+    newKeyBytes.set(new Uint8Array(await crypto.subtle.exportKey("raw", newPair.publicKey)), 2);
+    const nextDidKey = `did:key:${base58btc.encode(newKeyBytes)}`;
+    const encrypted = await encryptor.encrypt(accountId, "hail-messaging", "ed25519", nextDidKey,
+      new Uint8Array(await crypto.subtle.exportKey("pkcs8", newPair.privateKey)));
+    const rotatedResolver: HailDidResolver = { async resolve(did) {
+      const resolved = await resolver.resolve(did);
+      return did === bob ? { ...resolved, messagingDidKey: nextDidKey } : resolved;
+    } };
+    const newSigner = new DeliveryStatusSigner(db.sql, {
+      async getKey() { return { accountId, role: "hail-messaging" as const,
+        algorithm: "ed25519" as const, publicKey: nextDidKey, ...encrypted }; },
+    }, encryptor, rotatedResolver, "https://bob.example/hail");
+    const rewrapped = await newSigner.signCurrent(alice, statusMessageId);
+    expect(rewrapped).not.toBeNull();
+    const inspected = inspectSignedPayload("hail.delivery-status", rewrapped!);
+    expect(inspected.payloadBytes).toEqual(previous.payloadBytes);
+    expect(inspected.payload.revision).toBe(2);
+    expect(Buffer.from(rewrapped!)).not.toEqual(Buffer.from(wrappers[0]!.cose));
+    const retained = await db.sql<{ signing_public_key: string }[]>`
+      SELECT signing_public_key FROM delivery_status_wrappers
+      WHERE sender_did = ${alice} AND message_id = ${statusMessageId} AND revision = 2
+    `;
+    expect(retained.map((row) => row.signing_public_key).sort()).toEqual([keyDid, nextDidKey].sort());
+    const aliceReceiver = new DeliveryStatusReceiver(db.sql, {
+      async getAccountByDid(value) { return value === alice ? {
+        id: aliceAccountId, did: alice, state: "active" as const,
+        activationVerificationMode: "public" as const, tenantId: randomUUID(),
+        canonicalAddress: "alice@example.com", activationAttemptId: null,
+      } : null; },
+    }, rotatedResolver, "https://alice.example/hail");
+    const path = encodeBase64Url(inspected.payload.envelope_digest.value);
+    expect(await aliceReceiver.receive(path, rewrapped!)).toBe("acknowledged");
+    expect(await aliceReceiver.receive(path, wrappers[0]!.cose)).toBe("unknown");
   });
 
   it("accepts a first-observed terminal snapshot and records the missing accepted revision", async () => {

@@ -13,6 +13,7 @@ import type { EnvelopeReceiver } from "./envelopes/receiver.js";
 import type { DeliveryStatusSigner } from "./delivery/status.js";
 import { registerDeliveryStatusRoutes } from "./delivery/status-routes.js";
 import type { DeliveryStatusReceiver } from "./delivery/status-receiver.js";
+import { ProtectedResponseSchedule } from "./http/protected-schedule.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -40,6 +41,7 @@ export function createApp(
   dependencies: AppDependencies = defaultDependencies,
 ): Hono {
   const app = new Hono();
+  const protectedSchedule = new ProtectedResponseSchedule();
 
   if (dependencies.discoveryStore) {
     registerDiscoveryRoutes(app, config.publicOrigin, dependencies.discoveryStore);
@@ -51,8 +53,10 @@ export function createApp(
     registerGrantRoutes(app, config.hailServiceBase, dependencies.grantReceiver);
   }
   if (dependencies.bodyStore) registerBodyRoutes(app, dependencies.bodyStore);
-  if (dependencies.envelopeReceiver) registerEnvelopeRoutes(app, dependencies.envelopeReceiver, dependencies.deliveryStatusSigner);
-  if (dependencies.deliveryStatusReceiver) registerDeliveryStatusRoutes(app, dependencies.deliveryStatusReceiver);
+  if (dependencies.envelopeReceiver) registerEnvelopeRoutes(app, dependencies.envelopeReceiver,
+    dependencies.deliveryStatusSigner, protectedSchedule);
+  if (dependencies.deliveryStatusReceiver) registerDeliveryStatusRoutes(app, dependencies.deliveryStatusReceiver,
+    protectedSchedule);
 
   app.get("/health/live", (context) =>
     context.json({

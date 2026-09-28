@@ -111,11 +111,12 @@ export class EnvelopeRepository {
     return rows.length > 0;
   }
 
-  async accept(input: EnvelopeDecision): Promise<EnvelopeOutcome> {
+  async accept(input: EnvelopeDecision, signal?: AbortSignal): Promise<EnvelopeOutcome> {
     const { payload, localAccountId, payloadDigest } = input;
     if (payload.authorization.type === "reply") {
       const replyTo = payload.authorization.reply_to;
       return this.sql.begin(async (tx): Promise<EnvelopeOutcome> => {
+        signal?.throwIfAborted();
         const claims = await tx<{ sender_account_id: string; reply_until: number | string | bigint;
           state: string; envelope_cose: Uint8Array }[]>`
           SELECT sent.sender_account_id, capability.reply_until, capability.state, sent.envelope_cose
@@ -128,6 +129,7 @@ export class EnvelopeRepository {
           FOR UPDATE OF capability
         `;
         const claim = claims[0];
+        signal?.throwIfAborted();
         if (!claim || claim.sender_account_id !== localAccountId) return "unauthorized";
         const original = inspectSignedPayload("hail.envelope", claim.envelope_cose).payload;
         if (!original.reply.allowed || original.reply.until !== Number(claim.reply_until) ||
@@ -135,6 +137,7 @@ export class EnvelopeRepository {
         const previous = await this.previousOutcome(tx, payload, payloadDigest);
         if (previous) return previous;
         const clock = await tx<{ instant: string | number }[]>`SELECT extract(epoch from clock_timestamp()) AS instant`;
+        signal?.throwIfAborted();
         const now = Number(clock[0]!.instant);
         const deadline = Math.min(payload.expires_at + 300, payload.body.available_until, payload.body.access.expires_at);
         const outcome = now > deadline ? "message-expired"
@@ -154,6 +157,7 @@ export class EnvelopeRepository {
     // Lock the grant pointer before inspecting its status or reserving the replay key.
     // Revocation and acceptance serialize on the same lineage row.
     return this.sql.begin(async (tx): Promise<EnvelopeOutcome> => {
+      signal?.throwIfAborted();
       const lineages = await tx<{
         local_account_id: string; current_status: string; expires_at: string | number | bigint | null;
         scope_payload: unknown;
@@ -167,10 +171,12 @@ export class EnvelopeRepository {
         FOR UPDATE OF lineage
       `;
       const lineage = lineages[0];
+      signal?.throwIfAborted();
       if (!lineage || lineage.local_account_id !== localAccountId) return "unauthorized";
       const previous = await this.previousOutcome(tx, payload, payloadDigest);
       if (previous) return previous;
       const clock = await tx<{ instant: string | number }[]>`SELECT extract(epoch from clock_timestamp()) AS instant`;
+      signal?.throwIfAborted();
       const now = Number(clock[0]!.instant);
       const scope = typeof lineage.scope_payload === "string" ? JSON.parse(lineage.scope_payload) : lineage.scope_payload;
       const selector = Array.isArray(scope) ? scope[0] : null;

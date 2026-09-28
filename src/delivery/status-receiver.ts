@@ -19,8 +19,9 @@ export class DeliveryStatusReceiver {
     private readonly serviceBase: string,
   ) {}
 
-  async receive(pathDigest: string, cose: Uint8Array): Promise<StatusOutcome> {
+  async receive(pathDigest: string, cose: Uint8Array, signal?: AbortSignal): Promise<StatusOutcome> {
     try {
+      signal?.throwIfAborted();
       const inspected = inspectSignedPayload("hail.delivery-status", cose);
       const payload = inspected.payload;
       // Claimed fields here are lookup hints only. Nothing is disclosed or changed before verification.
@@ -28,33 +29,41 @@ export class DeliveryStatusReceiver {
         SELECT recipient_did, envelope_digest FROM sent_envelopes
         WHERE sender_did = ${payload.to} AND message_id = ${payload.message_id}
       `;
+      signal?.throwIfAborted();
       if (!candidate[0]) return "unknown";
       const recipient = await this.resolver.resolve(payload.from);
+      signal?.throwIfAborted();
       await verifySignedPayload("hail.delivery-status", cose,
         createWebCryptoVerifier(async (kid) => {
           if (kid !== `${payload.from}#hail-messaging`) throw new Error("Wrong status key role");
           return ed25519PublicKeyFromDidKey(recipient.messagingDidKey);
         }));
+      signal?.throwIfAborted();
       const sender = await this.resolver.resolve(payload.to);
+      signal?.throwIfAborted();
       const local = await this.accounts.getAccountByDid(payload.to);
+      signal?.throwIfAborted();
       if (sender.serviceBase !== this.serviceBase || !local || local.state !== "active" ||
         local.activationVerificationMode !== "public") return "unknown";
       if (candidate[0].recipient_did !== payload.from ||
         !Buffer.from(candidate[0].envelope_digest).equals(Buffer.from(payload.envelope_digest.value))) return "unknown";
       if (pathDigest !== Buffer.from(payload.envelope_digest.value).toString("base64url")) return "bad-request";
-      return this.apply(payload, inspected.payloadBytes, cose, recipient.messagingDidKey, recipient.evidence);
+      return this.apply(payload, inspected.payloadBytes, cose, recipient.messagingDidKey, recipient.evidence, signal);
     } catch { return "unknown"; }
   }
 
   private async apply(
     payload: HailDeliveryStatus, bytes: Uint8Array, cose: Uint8Array, publicKey: string,
     evidence: Awaited<ReturnType<HailDidResolver["resolve"]>>["evidence"],
+    signal?: AbortSignal,
   ): Promise<StatusOutcome> {
     return this.sql.begin(async (tx): Promise<StatusOutcome> => {
+      signal?.throwIfAborted();
       const sent = await tx<SentRow[]>`
         SELECT recipient_did, envelope_digest FROM sent_envelopes
         WHERE sender_did = ${payload.to} AND message_id = ${payload.message_id} FOR UPDATE
       `;
+      signal?.throwIfAborted();
       if (!sent[0] || sent[0].recipient_did !== payload.from ||
         !Buffer.from(sent[0].envelope_digest).equals(Buffer.from(payload.envelope_digest.value))) return "unknown";
       const previous = await tx<{ current_revision: number; current_state: string; payload_bytes: Uint8Array }[]>`
@@ -73,6 +82,7 @@ export class DeliveryStatusReceiver {
       }
       if (!Buffer.from(encodePayload("hail.delivery-status", payload)).equals(Buffer.from(bytes))) return "bad-request";
       const gap = current ? payload.revision - current.current_revision - 1 : payload.revision - 1;
+      signal?.throwIfAborted();
       await tx`
         INSERT INTO sent_delivery_status (sender_did, message_id, recipient_did, current_revision,
           current_state, payload_bytes, cose, signing_public_key, signing_plc_document,

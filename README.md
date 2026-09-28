@@ -160,3 +160,29 @@ DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail \
 ```
 
 The integration test skips when `DATABASE_URL` is absent.
+
+## Backend Hardening (Local Work)
+
+The first hardening slice shares one response schedule and bounded validation
+budget between envelope submission and delivery-status push. The provisional
+750 ms response minimum, 10-second processing deadline, and 32-work provider
+gate are not production-calibrated. The complete checklist and measurement
+criteria are in the sibling TypeScript backend POC guide, Phase 12.
+PLC directory reads now use a 5-second cancellable HTTP deadline, 1 MiB
+decoded response ceiling, strict duplicate-member-rejecting JSON parsing,
+and no redirects; the directory base is configured rather than derived from
+an untrusted DID. PLC operation submission remains delegated to the pinned
+official client, preserving onboarding's exact-operation retry semantics.
+
+To exercise the initial response and PLC rotation fixtures without a running
+provider database:
+
+```bash
+bun run test test/envelope-routes.test.ts test/protected-schedule.test.ts \
+  test/envelope-deadline.test.ts test/plc-rotation-boundary.test.ts \
+  test/plc-client.test.ts
+```
+
+The PLC fixture validates a signed operation-log update and current endpoint
+selection. It does not simulate the fenced provider-state transfer required
+for a real service migration. These changes have not yet been deployed.
