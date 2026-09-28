@@ -408,3 +408,23 @@ revision 2, which converged in one `204` publication attempt. Both providers
 retain the two-revision chain and report the Grant as revoked. Pre-migration
 logical backups are in
 `/var/backups/hail-poc/pre-grant-20260928T020119Z`.
+
+Migrations 8–11 and the detached-body, envelope, durable-delivery, and signed
+status slices were deployed on 2026-09-28 from provider source `0dd5860` and
+protocol guide `58b25fe`. Both pre-rollout provider dumps were verified at
+`/var/backups/hail-poc/pre-delivery-20260928T123933Z`. The deployed provider
+image is `sha256:7f8d8bea504d42d12feee077bccc02a2cde0cab1a1cb3d46f9ac715941553f74`;
+the previous provider image is tagged
+`hail-server-ts:pre-delivery-20260928T123933Z` on the VPS.
+
+Bob's new Grant `01a0e809-cf1c-7fa5-99f3-c783aa1bfd28` converged at Alice
+with HTTP `201`. Alice published a 120-byte body and submitted message
+`01a0e80a-6718-741b-a7ba-c2eae2481ba7`; Bob returned signed `accepted`
+revision 1, durably delivered the verified body, and pushed terminal revision
+2. Alice acknowledged it with HTTP `204` and retained `delivered` revision 2.
+An exact retry returned the delivered snapshot without another delivery. An
+invalid signature received a generic `202`, and an out-of-scope category was
+rejected before signing. Bob then revoked the Grant, published the tombstone
+to Alice, and rejected a previously signed second envelope without accepting
+new work; the first message remained delivered. The Grant is now terminally
+revoked. Both provider containers remained healthy with zero restarts.
