@@ -1,0 +1,12 @@
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+hailproto.app {
+	reverse_proxy hail-app:3000
+}
+
+hailproto.dev {
+	reverse_proxy hail-dev:3000
+}

@@ -1,0 +1,35 @@
+{
+  "name": "hail-server-ts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.0",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "activate:local": "bun src/cli/activate-local.ts",
+    "activate:public": "bun src/cli/activate-public.ts",
+    "db:migrate": "bun src/cli/migrate.ts",
+    "dev": "bun --watch src/index.ts",
+    "onboard": "bun src/cli/onboard.ts",
+    "profile:create": "bun src/cli/create-profile.ts",
+    "profile:verify": "bun src/cli/verify-profile.ts",
+    "server": "bun src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@atproto/common": "0.8.1",
+    "@atproto/crypto": "0.5.4",
+    "@did-plc/lib": "file:../did-method-plc/packages/lib",
+    "@hailproto/codec": "file:../hailproto/packages/hail-codec-ts",
+    "@ipld/dag-cbor": "9.2.7",
+    "hono": "4.13.9",
+    "ipaddr.js": "2.2.0",
+    "multiformats": "13.4.2"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.0"
+  }
+}
