@@ -68,6 +68,11 @@ const migrations: readonly Migration[] = [
     name: "delivery-status",
     url: new URL("../../migrations/0011_delivery_status.sql", import.meta.url),
   },
+  {
+    version: 12,
+    name: "reply-capabilities",
+    url: new URL("../../migrations/0012_reply_capabilities.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

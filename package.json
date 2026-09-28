@@ -19,6 +19,7 @@
     "body:publish": "bun src/cli/publish-body.ts",
     "body:authorize": "bun src/cli/authorize-body.ts",
     "envelope:create": "bun src/cli/create-envelope.ts",
+    "envelope:reply": "bun src/cli/create-reply.ts",
     "envelope:submit": "bun src/cli/submit-envelope.ts",
     "delivery:once": "bun src/cli/work-deliveries.ts",
     "status:publish": "bun src/cli/publish-status.ts",

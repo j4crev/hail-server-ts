@@ -346,6 +346,86 @@ revocation-first submission must not enter `accepted`, while a previously
 accepted envelope keeps delivery responsibility. Record actual results and
 commit IDs in the protocol implementation log.
 
+## Reply-Capability Rollout
+
+Migration 12 adds single-use reply invitations and explicit authorization
+lineage to sent and received envelopes. Before replacing either provider,
+repeat the two `pg_dump -Fc` and `pg_restore --list` backup commands above
+using a fresh `pre-reply-<UTC timestamp>` directory; keep both dumps and the
+current provider image. Rebuild the shared provider image, replace `hail-app`
+and `hail-dev`, check that **both** databases report schema version `12`, and
+confirm both public readiness endpoints and provider logs are healthy.
+Existing Grant envelopes and messages remain valid.
+
+The prior demonstration Grant is terminally revoked, and the original message
+did not invite a reply. Create and publish a **new active Bob-to-Alice Grant**
+with the commands above. Record its new `grant_id`. Alice publishes a body:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec -T hail-app \
+  bun run body:publish -- did:plc:rewawq7tylmrzaaprd27sdhb examples/alice-body.txt
+```
+
+Set `body_digest` to its printed digest. Choose a future reply deadline (here,
+30 days), then create the original envelope:
+
+```bash
+reply_until=$(($(date -u +%s) + 2592000))
+docker compose --env-file .env -f compose.yaml exec -T hail-app \
+  bun run envelope:create -- did:plc:rewawq7tylmrzaaprd27sdhb \
+  "$grant_id" "$body_digest" updates --reply-until "$reply_until"
+```
+
+Set `original_message_id` to the UUIDv7 printed by `envelope:create`, then
+submit it:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec -T hail-app \
+  bun run envelope:submit -- did:plc:rewawq7tylmrzaaprd27sdhb "$original_message_id"
+```
+
+Wait until Bob has accepted and durably delivered that message. On **Bob's**
+provider, publish a reply body:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec -T hail-dev \
+  bun run body:publish -- did:plc:ih42yibclij7lv6264hoaodo examples/alice-body.txt
+```
+
+Set `reply_body_digest` to the printed digest, then create the reply:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec -T hail-dev \
+  bun run envelope:reply -- did:plc:ih42yibclij7lv6264hoaodo \
+  "$original_message_id" "$reply_body_digest"
+```
+
+Set `reply_message_id` to the new UUIDv7 printed by `envelope:reply`, then
+submit it:
+
+```bash
+docker compose --env-file .env -f compose.yaml exec -T hail-dev \
+  bun run envelope:submit -- did:plc:ih42yibclij7lv6264hoaodo "$reply_message_id"
+```
+
+Bob needs no Grant from Alice for this reply. Check Alice's `delivery_work` and
+`delivered_messages`, Bob's `sent_delivery_status`, and the terminal
+publication outbox using the same SQL queries above with provider roles
+reversed. Alice should accept exactly one reply, consume her original
+`reply_capabilities` row, push signed `delivered` status, and receive a `204`
+acknowledgement from Bob. An exact retry of Bob's reply returns current status
+without creating another delivery. A second distinct reply referring to the
+same original message must not be accepted. Unknown, expired, or wrong-party
+invitations must receive the privacy-preserving generic outcome.
+
+An outgoing reply defaults to `reply.allowed: false`. To invite one further
+reply, add `--reply-until <future-unix-seconds>` to `envelope:reply`; see the
+protocol's reply authorization and terminal transition rules before extending
+a conversation. The old production image has no reply processing, so image
+rollback after migration 12 requires reconciliation of any reply records
+created since the upgrade; restore from the pre-reply dumps for a full
+rollback.
+
 ## IPv6
 
 After IPv4 activation succeeds, configure the VPS's static IPv6 address and

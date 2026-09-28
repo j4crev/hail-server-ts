@@ -27,6 +27,16 @@ export class EnvelopeRepository {
     return rows[0] ? new Uint8Array(rows[0].envelope_cose) : null;
   }
 
+  async receivedReplyOpportunity(recipientDid: string, messageId: string): Promise<HailEnvelope | null> {
+    const rows = await this.sql<{ envelope_cose: Uint8Array }[]>`
+      SELECT envelope_cose FROM received_envelopes
+      WHERE recipient_did = ${recipientDid} AND message_id = ${messageId} AND outcome = 'accepted'
+    `;
+    if (!rows[0]) return null;
+    const payload = inspectSignedPayload("hail.envelope", rows[0].envelope_cose).payload;
+    return payload.to === recipientDid && payload.message_id === messageId ? payload : null;
+  }
+
   async publishedBody(senderDid: string, digest: Uint8Array): Promise<PublishedBodyInfo | null> {
     const rows = await this.sql<{ size: number; sender_account_id: string }[]>`
       SELECT octet_length(body.body_bytes) AS size, body.sender_account_id
@@ -38,8 +48,8 @@ export class EnvelopeRepository {
   }
 
   async createSent(payload: HailEnvelope, representation: Uint8Array, accountId: string): Promise<void> {
-    if (payload.authorization.type !== "grant") throw new Error("Only grant-authorized envelopes are supported");
-    const grantId = payload.authorization.grant_id;
+    const grantId = payload.authorization.type === "grant" ? payload.authorization.grant_id : null;
+    const replyTo = payload.authorization.type === "reply" ? payload.authorization.reply_to : null;
     const inspected = inspectSignedPayload("hail.envelope", representation);
     if (!Buffer.from(inspected.payloadBytes).equals(Buffer.from(encodePayload("hail.envelope", payload))) ||
       representation.length > 16_384) {
@@ -60,11 +70,18 @@ export class EnvelopeRepository {
       const body = bodies[0];
       if (!body || body.size !== payload.body.size) throw new Error("Signed body is not published");
       await tx`
-        INSERT INTO sent_envelopes (sender_did, message_id, recipient_did, grant_id, envelope_cose,
-          envelope_digest, body_digest, sender_account_id)
-        VALUES (${payload.from}, ${payload.message_id}, ${payload.to}, ${grantId},
-          ${representation}, ${envelopeDigest}, ${payload.body.digest.value}, ${accountId})
+        INSERT INTO sent_envelopes (sender_did, message_id, recipient_did, grant_id,
+          reply_to_message_id, authorization_type, envelope_cose, envelope_digest, body_digest, sender_account_id)
+        VALUES (${payload.from}, ${payload.message_id}, ${payload.to}, ${grantId}, ${replyTo},
+          ${payload.authorization.type}, ${representation}, ${envelopeDigest}, ${payload.body.digest.value}, ${accountId})
       `;
+      if (payload.reply.allowed) {
+        await tx`
+          INSERT INTO reply_capabilities (original_sender_did, original_message_id,
+            permitted_recipient_did, reply_until)
+          VALUES (${payload.from}, ${payload.message_id}, ${payload.to}, ${payload.reply.until})
+        `;
+      }
       await tx`
         INSERT INTO body_authorizations
           (token_hash, body_digest, sender_account_id, recipient_did, message_id, expires_at, available_until)
@@ -78,17 +95,61 @@ export class EnvelopeRepository {
     });
   }
 
-  async candidate(grantId: string, from: string, to: string): Promise<boolean> {
+  async candidate(authorization: HailEnvelope["authorization"], from: string, to: string): Promise<boolean> {
+    if (authorization.type === "reply") {
+      const rows = await this.sql<{ original_message_id: string }[]>`
+        SELECT original_message_id FROM reply_capabilities
+        WHERE original_sender_did = ${to} AND original_message_id = ${authorization.reply_to}
+          AND permitted_recipient_did = ${from}
+      `;
+      return rows.length > 0;
+    }
     const rows = await this.sql<{ grant_id: string }[]>`
-      SELECT grant_id FROM grant_lineages WHERE grant_id = ${grantId} AND grantor_did = ${to}
+      SELECT grant_id FROM grant_lineages WHERE grant_id = ${authorization.grant_id} AND grantor_did = ${to}
         AND grantee_did = ${from} AND local_role = 'grantor'
     `;
     return rows.length > 0;
   }
 
   async accept(input: EnvelopeDecision): Promise<EnvelopeOutcome> {
-    const { payload, representation, envelopeDigest, payloadDigest, localAccountId, signingPublicKey, evidence } = input;
-    if (payload.authorization.type !== "grant") return "unauthorized";
+    const { payload, localAccountId, payloadDigest } = input;
+    if (payload.authorization.type === "reply") {
+      const replyTo = payload.authorization.reply_to;
+      return this.sql.begin(async (tx): Promise<EnvelopeOutcome> => {
+        const claims = await tx<{ sender_account_id: string; reply_until: number | string | bigint;
+          state: string; envelope_cose: Uint8Array }[]>`
+          SELECT sent.sender_account_id, capability.reply_until, capability.state, sent.envelope_cose
+          FROM reply_capabilities capability JOIN sent_envelopes sent
+            ON sent.sender_did = capability.original_sender_did
+            AND sent.message_id = capability.original_message_id
+          WHERE capability.original_sender_did = ${payload.to}
+            AND capability.original_message_id = ${replyTo}
+            AND capability.permitted_recipient_did = ${payload.from}
+          FOR UPDATE OF capability
+        `;
+        const claim = claims[0];
+        if (!claim || claim.sender_account_id !== localAccountId) return "unauthorized";
+        const original = inspectSignedPayload("hail.envelope", claim.envelope_cose).payload;
+        if (!original.reply.allowed || original.reply.until !== Number(claim.reply_until) ||
+          original.from !== payload.to || original.to !== payload.from) return "unauthorized";
+        const previous = await this.previousOutcome(tx, payload, payloadDigest);
+        if (previous) return previous;
+        const clock = await tx<{ instant: string | number }[]>`SELECT extract(epoch from clock_timestamp()) AS instant`;
+        const now = Number(clock[0]!.instant);
+        const deadline = Math.min(payload.expires_at + 300, payload.body.available_until, payload.body.access.expires_at);
+        const outcome = now > deadline ? "message-expired"
+          : claim.state === "available" && now <= original.reply.until + 300 ? "accepted" : "unauthorized";
+        const inserted = await this.insertReceived(tx, input, null, replyTo, outcome, now);
+        if (inserted && outcome === "accepted") {
+          await tx`
+            UPDATE reply_capabilities SET state = 'claimed', claimed_sender_did = ${payload.from},
+              claimed_message_id = ${payload.message_id}, updated_at = clock_timestamp()
+            WHERE original_sender_did = ${payload.to} AND original_message_id = ${replyTo}
+          `;
+        }
+        return inserted ? outcome : this.previousOutcome(tx, payload, payloadDigest).then((winner) => winner ?? "conflict");
+      });
+    }
     const grantId = payload.authorization.grant_id;
     // Lock the grant pointer before inspecting its status or reserving the replay key.
     // Revocation and acceptance serialize on the same lineage row.
@@ -107,13 +168,8 @@ export class EnvelopeRepository {
       `;
       const lineage = lineages[0];
       if (!lineage || lineage.local_account_id !== localAccountId) return "unauthorized";
-      const previous = await tx<{ payload_digest: Uint8Array }[]>`
-        SELECT payload_digest FROM received_envelopes
-        WHERE sender_did = ${payload.from} AND message_id = ${payload.message_id}
-      `;
-      if (previous[0]) {
-        return Buffer.from(previous[0].payload_digest).equals(Buffer.from(payloadDigest)) ? "duplicate" : "conflict";
-      }
+      const previous = await this.previousOutcome(tx, payload, payloadDigest);
+      if (previous) return previous;
       const clock = await tx<{ instant: string | number }[]>`SELECT extract(epoch from clock_timestamp()) AS instant`;
       const now = Number(clock[0]!.instant);
       const scope = typeof lineage.scope_payload === "string" ? JSON.parse(lineage.scope_payload) : lineage.scope_payload;
@@ -124,12 +180,30 @@ export class EnvelopeRepository {
          (selector?.type === "uncategorized" && payload.category === undefined));
       const deadline = Math.min(payload.expires_at + 300, payload.body.available_until, payload.body.access.expires_at);
       const outcome = now > deadline ? "message-expired" : permitted ? "accepted" : "unauthorized";
-      const inserted = await tx<{ payload_digest: Uint8Array }[]>`
+      const inserted = await this.insertReceived(tx, input, grantId, null, outcome, now);
+      return inserted ? outcome : this.previousOutcome(tx, payload, payloadDigest).then((winner) => winner ?? "conflict");
+    });
+  }
+
+  private async previousOutcome(tx: SQL, payload: HailEnvelope, digest: Uint8Array): Promise<"duplicate" | "conflict" | null> {
+    const rows = await tx<{ payload_digest: Uint8Array }[]>`
+      SELECT payload_digest FROM received_envelopes
+      WHERE sender_did = ${payload.from} AND message_id = ${payload.message_id}
+    `;
+    return rows[0] ? Buffer.from(rows[0].payload_digest).equals(Buffer.from(digest)) ? "duplicate" : "conflict" : null;
+  }
+
+  private async insertReceived(tx: SQL, input: EnvelopeDecision, grantId: string | null,
+    replyTo: string | null, outcome: "accepted" | "unauthorized" | "message-expired", now: number): Promise<boolean> {
+    const { payload, representation, envelopeDigest, payloadDigest, localAccountId, signingPublicKey, evidence } = input;
+    const inserted = await tx<{ payload_digest: Uint8Array }[]>`
         INSERT INTO received_envelopes
-          (sender_did, message_id, recipient_did, grant_id, local_account_id, envelope_cose,
+          (sender_did, message_id, recipient_did, grant_id, reply_to_message_id,
+           authorization_type, local_account_id, envelope_cose,
            envelope_digest, payload_digest, signing_public_key, signing_plc_document,
            signing_plc_data, signing_plc_operation_log, outcome, accepted_at)
-        VALUES (${payload.from}, ${payload.message_id}, ${payload.to}, ${grantId},
+        VALUES (${payload.from}, ${payload.message_id}, ${payload.to}, ${grantId}, ${replyTo},
+          ${payload.authorization.type},
           ${localAccountId}, ${representation}, ${envelopeDigest}, ${payloadDigest}, ${signingPublicKey},
           ${JSON.stringify(evidence.document)}::jsonb, ${JSON.stringify(evidence.data)}::jsonb,
           ${JSON.stringify(evidence.log)}::jsonb, ${outcome},
@@ -137,20 +211,12 @@ export class EnvelopeRepository {
         ON CONFLICT (sender_did, message_id) DO NOTHING
         RETURNING payload_digest
       `;
-      if (inserted.length) {
-        if (outcome === "accepted") {
-          await tx`
-            INSERT INTO delivery_work (sender_did, message_id, state)
-            VALUES (${payload.from}, ${payload.message_id}, 'accepted')
-          `;
-        }
-        return outcome;
-      }
-      const winner = await tx<{ payload_digest: Uint8Array }[]>`
-        SELECT payload_digest FROM received_envelopes
-        WHERE sender_did = ${payload.from} AND message_id = ${payload.message_id}
+    if (inserted.length && outcome === "accepted") {
+      await tx`
+        INSERT INTO delivery_work (sender_did, message_id, state)
+        VALUES (${payload.from}, ${payload.message_id}, 'accepted')
       `;
-      return winner[0] && Buffer.from(winner[0].payload_digest).equals(Buffer.from(payloadDigest)) ? "duplicate" : "conflict";
-    });
+    }
+    return inserted.length > 0;
   }
 }

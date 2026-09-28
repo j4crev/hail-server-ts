@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { inspectSignedPayload, type HailEnvelope, type HailFailureReason, type HailHoldReason } from "@hailproto/codec";
+import { inspectSignedPayload, type HailCancellationReason, type HailEnvelope, type HailFailureReason, type HailHoldReason } from "@hailproto/codec";
 import type { SQL } from "bun";
 import { bodyDigest, validateBodyBytes } from "../bodies/service.js";
 
@@ -112,6 +112,13 @@ export class DeliveryRepository {
     });
   }
 
+  async cancel(claim: DeliveryClaim, reason: HailCancellationReason): Promise<void> {
+    await this.sql.begin(async (tx) => {
+      if (!await this.lockClaim(tx, claim)) return;
+      await this.finish(tx, claim, "cancelled", reason);
+    });
+  }
+
   async hold(claim: DeliveryClaim, reason: HailHoldReason, retryAt: Date): Promise<void> {
     await this.sql.begin(async (tx) => {
       if (!await this.lockClaim(tx, claim)) return;
@@ -143,7 +150,33 @@ export class DeliveryRepository {
     return Number(rows[0]!.instant);
   }
 
-  private async finish(tx: SQL, claim: DeliveryClaim, state: "delivered" | "failed", reason: string | null): Promise<void> {
+  private async finish(tx: SQL, claim: DeliveryClaim, state: "delivered" | "failed" | "cancelled", reason: string | null): Promise<void> {
+    if (claim.envelope.authorization.type === "reply") {
+      const replyTo = claim.envelope.authorization.reply_to;
+      const rows = await tx<{ state: string; claimed_sender_did: string | null;
+        claimed_message_id: string | null }[]>`
+        SELECT state, claimed_sender_did, claimed_message_id FROM reply_capabilities
+        WHERE original_sender_did = ${claim.envelope.to} AND original_message_id = ${replyTo}
+        FOR UPDATE
+      `;
+      const capability = rows[0];
+      if (!capability || capability.state !== "claimed" ||
+        capability.claimed_sender_did !== claim.senderDid || capability.claimed_message_id !== claim.messageId) {
+        throw new Error("Delivery claim does not own the reply capability");
+      }
+      if (state === "delivered") {
+        await tx`
+          UPDATE reply_capabilities SET state = 'consumed', updated_at = clock_timestamp()
+          WHERE original_sender_did = ${claim.envelope.to} AND original_message_id = ${replyTo}
+        `;
+      } else {
+        await tx`
+          UPDATE reply_capabilities SET state = 'available', claimed_sender_did = NULL,
+            claimed_message_id = NULL, updated_at = clock_timestamp()
+          WHERE original_sender_did = ${claim.envelope.to} AND original_message_id = ${replyTo}
+        `;
+      }
+    }
     await tx`
       UPDATE delivery_work SET state = ${state}, reason = ${reason},
         status_revision = status_revision + 1, lease_token = NULL,

@@ -111,6 +111,46 @@ Local revocation commits before publication and immediately remains
 authoritative even if the remote notification needs retries. A revoked Grant ID
 cannot become active again.
 
+## Single-Use Replies (Local POC)
+
+Reply authorization follows
+[`../hailproto/spec/envelopes.md`](../hailproto/spec/envelopes.md#reply-authorization):
+it is an invitation signed in a prior envelope, not a reverse-direction Grant.
+After migration 12, the original sender can opt in when signing its
+Grant-authorized envelope:
+
+```bash
+bun run envelope:create -- "$sender_did" "$grant_id" "$body_digest" updates \
+  --reply-until "$reply_until_unix_seconds"
+bun run envelope:submit -- "$sender_did" "$original_message_id"
+```
+
+Once that envelope has been accepted, the other provider publishes its own
+body and signs one reply using the original message ID:
+
+```bash
+bun run body:publish -- "$reply_sender_did" examples/alice-body.txt
+bun run envelope:reply -- "$reply_sender_did" "$original_message_id" "$reply_body_digest"
+bun run envelope:submit -- "$reply_sender_did" "$reply_message_id"
+```
+
+Set the shell variables from the earlier commands' printed values. A reply
+does not include a category and defaults to `reply.allowed: false`. Add
+`--reply-until "$next_reply_until_unix_seconds"` to `envelope:reply` to
+explicitly invite one further reply. The original sender serializes the
+single-use claim before accepting a reply, consumes it on delivery, and
+releases it after terminal failure or cancellation. The full phase and its
+limitations are in the sibling POC guide. The already-demonstrated public
+Grant is revoked and its signed envelope did not invite replies; this phase
+has not been deployed to the public providers.
+
+To test the local PostgreSQL reply lifecycle against a disposable database:
+
+```bash
+DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail \
+  bun --bun vitest run test/reply-capabilities.integration.test.ts
+```
+
 Run the PostgreSQL repository integration test against a disposable migrated
 database with:
 

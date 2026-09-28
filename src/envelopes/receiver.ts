@@ -20,10 +20,10 @@ export class EnvelopeReceiver {
     try {
       const inspected = inspectSignedPayload("hail.envelope", representation);
       const payload = inspected.payload;
-      if (payload.authorization.type !== "grant" || payload.from === payload.to ||
+      if (payload.from === payload.to ||
         payload.created_at > this.now() + 300 || representation.length > 16_384) return "ignored";
       // The claimed fields are used only for a cheap preliminary lookup, never for a durable mutation.
-      if (!await this.store.candidate(payload.authorization.grant_id, payload.from, payload.to)) return "ignored";
+      if (!await this.store.candidate(payload.authorization, payload.from, payload.to)) return "ignored";
       const sender = await this.resolver.resolve(payload.from);
       const verified = await verifySignedPayload(
         "hail.envelope", representation,
