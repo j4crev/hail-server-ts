@@ -305,3 +305,12 @@ Both domains use DNS-only Cloudflare apex `A` records. No `AAAA` records are
 published. Let's Encrypt certificates are managed by Caddy. The deployment
 secrets exist only at `/opt/hail-poc/hail-server-ts/deploy/poc/.env` with mode
 `0600` on the VPS.
+
+Migration 7 and the signed Grant slice were deployed on 2026-09-28. Bob created
+Grant `01a0e5c0-8657-7496-928b-a598cc79d0d0` for Alice's `updates` category.
+Revision 1 converged in one `201` publication attempt; an unchanged authoring
+retry reused the same signed representation. Bob then committed terminal
+revision 2, which converged in one `204` publication attempt. Both providers
+retain the two-revision chain and report the Grant as revoked. Pre-migration
+logical backups are in
+`/var/backups/hail-poc/pre-grant-20260928T020119Z`.
