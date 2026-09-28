@@ -161,7 +161,7 @@ DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail \
 
 The integration test skips when `DATABASE_URL` is absent.
 
-## Backend Hardening (Local Work)
+## Backend Hardening
 
 The first hardening slice shares one response schedule and bounded validation
 budget between envelope submission and delivery-status push. The provisional
@@ -185,4 +185,7 @@ bun run test test/envelope-routes.test.ts test/protected-schedule.test.ts \
 
 The PLC fixture validates a signed operation-log update and current endpoint
 selection. It does not simulate the fenced provider-state transfer required
-for a real service migration. These changes have not yet been deployed.
+for a real service migration. The first bounded-processing and PLC-read slice
+is deployed to both public POC providers; tested runtime and backup details
+are in `deploy/poc/README.md`. Further sustained-load calibration and
+continuity-preserving provider migration work remain outstanding.

@@ -568,3 +568,26 @@ accepted reply, pushed signed terminal revision 2 to Bob, and received HTTP
 reply returned that status without a second delivery. Alice could not reply
 again because Bob's reply did not invite further continuation. Both providers
 are healthy with zero restarts, and their databases are at migration 12.
+
+The first backend-hardening slice was deployed on 2026-09-28 from provider
+source `021dced` and protocol guide `e3f5f54`. No migration was added; both
+provider databases remained at version 12. Both custom-format dumps were
+validated under `/var/backups/hail-poc/pre-hardening-20260928T222933Z`, and the
+prior runtime was tagged `hail-server-ts:pre-hardening-20260928T222933Z`.
+The new shared provider image is
+`sha256:76e04125b365a2b59dac2a36d8dba81629005deb9f58335694a5625922b8cb0a`.
+
+Both public readiness URLs returned `200`. The bounded PLC read adapter
+resolved Alice and Bob, validating their one-operation logs and retrieving
+one audit entry each; a syntactically valid unknown DID retained the expected
+`404`. An exact terminal-status PUT was acknowledged with bodyless `204`.
+Eight-way Hono route measurements for eight protected cases had observed
+95th-percentile samples of 750–757 ms. After restarting each provider in
+turn, resubmitting the previously delivered Alice envelope and Bob reply
+returned their signed `delivered` revision-2 snapshots; each message still
+had exactly one delivered row and one body-retrieval attempt. Both providers
+were healthy with zero unexpected restarts and no application errors.
+Eight external HTTPS samples per protected generic path showed medians of
+782 ms for both malformed envelope submission and unknown status push;
+95th-percentile samples were 857 and 859 ms including network variance.
+The provisional 750 ms server floor still needs sustained-load calibration.
