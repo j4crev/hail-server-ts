@@ -394,9 +394,10 @@ export class OnboardingRepository
       SELECT profile.id, profile.account_id, profile.did, profile.revision,
              profile.profile_payload, profile.cose, profile.representation_digest,
              profile.signing_public_key, profile.profile_updated_at, profile.created_at
-      FROM sender_profiles AS profile
-      JOIN provider_accounts AS account ON account.id = profile.account_id
-      WHERE profile.did = ${did} AND account.onboarding_state = 'active'
+       FROM sender_profiles AS profile
+       JOIN provider_accounts AS account ON account.id = profile.account_id
+       WHERE profile.did = ${did} AND account.onboarding_state = 'active'
+         AND NOT EXISTS (SELECT 1 FROM provider_migration_fences fence WHERE fence.did = account.did)
       ORDER BY profile.revision DESC
       LIMIT 1
     `;

@@ -459,9 +459,12 @@ export class GrantRepository implements GrantStore {
       WITH candidate AS (
         SELECT publication.grant_id, publication.revision
         FROM grant_publications AS publication
+        JOIN grant_lineages AS owner ON owner.grant_id = publication.grant_id
         WHERE publication.state IN ('pending', 'retry')
           AND publication.next_attempt_at <= ${now}
           AND (publication.lease_expires_at IS NULL OR publication.lease_expires_at <= ${now})
+          AND NOT EXISTS (SELECT 1 FROM provider_migration_fences fence
+            WHERE fence.account_id = owner.local_account_id)
           AND NOT EXISTS (
             SELECT 1 FROM grant_publications AS prior
             WHERE prior.grant_id = publication.grant_id

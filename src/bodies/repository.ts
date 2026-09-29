@@ -60,11 +60,16 @@ export class BodyRepository implements BodyStore {
 
   async retrieve(digest: Uint8Array, tokenHash: Uint8Array, now: number): Promise<StoredBody | "missing-body" | null> {
     const auth = await this.sql<AuthorizationRow[]>`
-      SELECT body_digest, sender_account_id, expires_at, status FROM body_authorizations WHERE token_hash = ${tokenHash}
+      SELECT body_digest, sender_account_id, expires_at, status
+      FROM body_authorizations WHERE token_hash = ${tokenHash}
     `;
     const row = auth[0];
     if (!row || row.status !== "active" || Number(row.expires_at) < now ||
       !timingSafeEqual(Buffer.from(row.body_digest), Buffer.from(digest))) return null;
+    const fences = await this.sql<{ state: string }[]>`
+      SELECT state FROM provider_migration_fences WHERE account_id = ${row.sender_account_id}
+    `;
+    if (fences[0]) return fences[0].state === "retired" ? null : "missing-body";
     const bodies = await this.sql<BodyRow[]>`
       SELECT digest, body_bytes, sender_account_id FROM detached_bodies WHERE digest = ${digest} AND sender_account_id = ${row.sender_account_id}
     `;

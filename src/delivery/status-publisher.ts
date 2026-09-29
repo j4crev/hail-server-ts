@@ -78,6 +78,8 @@ export class TerminalStatusPublisher {
           AND work.message_id = publication.message_id
         WHERE publication.state IN ('pending', 'retry') AND publication.next_attempt_at <= now()
           AND (publication.lease_expires_at IS NULL OR publication.lease_expires_at <= now())
+          AND NOT EXISTS (SELECT 1 FROM provider_migration_fences fence
+            WHERE fence.did = received.recipient_did)
         ORDER BY publication.next_attempt_at, publication.message_id
         FOR UPDATE OF publication SKIP LOCKED LIMIT 1
       `;

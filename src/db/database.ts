@@ -73,6 +73,51 @@ const migrations: readonly Migration[] = [
     name: "reply-capabilities",
     url: new URL("../../migrations/0012_reply_capabilities.sql", import.meta.url),
   },
+  {
+    version: 13,
+    name: "migration-fence",
+    url: new URL("../../migrations/0013_migration_fence.sql", import.meta.url),
+  },
+  {
+    version: 14,
+    name: "migration-snapshots",
+    url: new URL("../../migrations/0014_migration_snapshots.sql", import.meta.url),
+  },
+  {
+    version: 15,
+    name: "portable-migration-authority",
+    url: new URL("../../migrations/0015_portable_migration_authority.sql", import.meta.url),
+  },
+  {
+    version: 16,
+    name: "portable-cutover-observation",
+    url: new URL("../../migrations/0016_portable_cutover_observation.sql", import.meta.url),
+  },
+  {
+    version: 17,
+    name: "user-signed-cutover-operation",
+    url: new URL("../../migrations/0017_user_signed_cutover_operation.sql", import.meta.url),
+  },
+  {
+    version: 18,
+    name: "destination-operational-keys",
+    url: new URL("../../migrations/0018_destination_operational_keys.sql", import.meta.url),
+  },
+  {
+    version: 19,
+    name: "portable-destination-address",
+    url: new URL("../../migrations/0019_portable_destination_address.sql", import.meta.url),
+  },
+  {
+    version: 20,
+    name: "portable-cutover-activation",
+    url: new URL("../../migrations/0020_portable_cutover_activation.sql", import.meta.url),
+  },
+  {
+    version: 21,
+    name: "migration-retirement-receipt",
+    url: new URL("../../migrations/0021_migration_retirement_receipt.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

@@ -35,6 +35,8 @@ export class DeliveryRepository {
           ON received.sender_did = work.sender_did AND received.message_id = work.message_id
         WHERE work.state IN ('accepted', 'on-hold') AND work.next_attempt_at <= now()
           AND (work.lease_expires_at IS NULL OR work.lease_expires_at <= now())
+          AND NOT EXISTS (SELECT 1 FROM provider_migration_fences fence
+            WHERE fence.did = received.recipient_did)
         ORDER BY work.next_attempt_at, work.message_id
         FOR UPDATE OF work SKIP LOCKED LIMIT 1
       `;

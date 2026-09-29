@@ -183,9 +183,56 @@ bun run test test/envelope-routes.test.ts test/protected-schedule.test.ts \
   test/plc-client.test.ts
 ```
 
+Against a disposable PostgreSQL database, the ambiguous PLC-write fixture
+tests restart-safe exact-operation reconciliation, exact retransmission after
+an uncommitted request, and hash-prefix collision rejection:
+
+```bash
+DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail \
+  bun --bun vitest run test/onboarding-restart.integration.test.ts
+```
+
 The PLC fixture validates a signed operation-log update and current endpoint
 selection. It does not simulate the fenced provider-state transfer required
 for a real service migration. The first bounded-processing and PLC-read slice
 is deployed to both public POC providers; tested runtime and backup details
 are in `deploy/poc/README.md`. Further sustained-load calibration and
 continuity-preserving provider migration work remain outstanding.
+
+## Portable Provider Cutover (Disposable Rehearsal)
+
+Migrations 13–21 add DID-scoped source write fences, authenticated immutable
+snapshots, destination-owned prepared operational keys, a signed user-consent
+and PLC operation check, and an inactive destination import. The activation
+service verifies an independently witnessed 72-hour recovery quarantine and
+the user's externally published Address Binding before importing all state in
+one transaction. It renews the Sender Profile with the destination messaging
+key, normalizes inherited leases, and gives the source a signed retirement
+receipt. The source never receives the destination private key; the snapshot
+contains **no encrypted private-key ciphertext** from the source.
+
+These commands are operator building blocks, **not a public migration
+procedure**: `migration:prepare-target` on the destination, then
+`migration:fence` and `migration:export` on the source, followed by
+`migration:stage` with separate user-signed consent, exact signed PLC update,
+and fresh user-signed Address Binding. Export and consent files must be private
+(`0600`) and transferred over an authenticated administrative channel.
+There is no public PLC submission or activation CLI until independent monitor,
+mirror, vault, recovery and user-domain publication infrastructure exists.
+The current public POC accounts were created with custodial keys in a private
+directory and **must not be used as portable migration sources**. Separate
+reference projects now exist at `../hail-user-client-ts` for user-controlled
+key generation, encrypted vault recovery and offline signing, and
+`../hail-plc-monitor-ts` for user-run independent PLC monitoring and signed
+coverage attestations. They are reference implementations, not production
+infrastructure. Mobile clients can implement the same signing profile with
+platform-specific secure storage. See the sibling
+`../hailproto/docs/production-portable-custody.md` for the complete trust model.
+
+Test the safe cutover boundaries using two disposable PostgreSQL databases:
+
+```bash
+DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail_source \
+TRANSFER_TARGET_DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail_target \
+  bun --bun vitest run test/migration-fence.integration.test.ts
+```

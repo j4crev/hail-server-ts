@@ -5,3 +5,10 @@ coverage/
 .env.*
 !.env.example
 *.tsbuildinfo
+*.pkcs8
+*.pem
+*.key
+*.migration-export.json
+*.migration-consent.json
+*.migration-plc-operation.json
+*.migration-binding.cose
