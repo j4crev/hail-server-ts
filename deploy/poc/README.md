@@ -587,6 +587,27 @@ turn, resubmitting the previously delivered Alice envelope and Bob reply
 returned their signed `delivered` revision-2 snapshots; each message still
 had exactly one delivered row and one body-retrieval attempt. Both providers
 were healthy with zero unexpected restarts and no application errors.
+
+### Portable-Custody Development Boundary
+
+Provider source after the deployed hardening runtime includes **local-only**
+migrations 13–21, the fenced transfer rehearsal and user-owned key/monitor
+interfaces. The VPS still runs provider runtime `021dced` with migration 12 on
+both databases. Do **not** rebuild or restart public providers from the newer
+source expecting a portable production migration: startup automatically
+applies pending migrations, while the live Alice and Bob DIDs are custodial
+and exist only in a private PLC registry. A provider-held user identity key
+fails the new portable-custody precondition by design.
+
+The new separate public reference projects are
+<https://github.com/j4crev/hail-user-client-ts> (local user keys and encrypted
+backup) and <https://github.com/j4crev/hail-plc-monitor-ts> (user-run PLC
+monitor). No independently hosted monitor, verified public PLC export
+checkpoint, real user-domain transfer or public `plc.directory` portable DID
+has yet been deployed. The full trust and rollout boundary is recorded in
+`/opt/hail-poc/hailproto/docs/production-portable-custody.md` when that guide
+is installed; the older deployed runtime remains the supported public POC
+until those production prerequisites pass.
 Eight external HTTPS samples per protected generic path showed medians of
 782 ms for both malformed envelope submission and unknown status push;
 95th-percentile samples were 857 and 859 ms including network variance.
