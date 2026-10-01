@@ -153,6 +153,16 @@ const migrations: readonly Migration[] = [
     name: "transfer-cancellation",
     url: new URL("../../migrations/0028_transfer_cancellation.sql", import.meta.url),
   },
+  {
+    version: 29,
+    name: "private-poc-cutover",
+    url: new URL("../../migrations/0029_private_poc_cutover.sql", import.meta.url),
+  },
+  {
+    version: 30,
+    name: "private-poc-onboarding",
+    url: new URL("../../migrations/0030_private_poc_onboarding.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

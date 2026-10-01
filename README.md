@@ -201,7 +201,7 @@ continuity-preserving provider migration work remain outstanding.
 
 ## Portable Provider Cutover (Disposable Rehearsal)
 
-Migrations 13–28 add DID-scoped source write fences, authenticated immutable
+Migrations 13–30 add DID-scoped source write fences, authenticated immutable
 snapshots, destination-owned prepared operational keys, a signed user-consent
 and PLC operation check, and an inactive destination import. The activation
 service verifies two independently witnessed current PLC reads and monitor
@@ -278,3 +278,49 @@ DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail_source \
 TRANSFER_TARGET_DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail_target \
   bun --bun vitest run test/migration-fence.integration.test.ts
 ```
+
+### Private-PLC POC Ceremony (New DIDs Only)
+
+The `private-poc` profile is explicitly restricted to the POC's internal
+`http://plc:2582` registry and the configured `hailproto.app`/`hailproto.dev`
+Hail service bases. Disposable tests also permit `http://plc.fixture:2582`.
+It uses one validated canonical private PLC log and records `poc-local`
+monitor evidence: **no independent mirror or monitoring guarantee is implied**.
+The normal public activation profile still requires `https://plc.directory`,
+two independent read paths and the signed external monitor attestation.
+
+For a **fresh** POC DID, generate and independently back up a user vault using
+`../hail-user-client-ts`. After verifying its recovery secret, the source
+provider and client run:
+
+```text
+source: poc:prepare-portable -- <address> <user-recovery-key> <user-identity-key> <new-private-preparation-file> --backup-verified
+client: poc:sign-onboarding -- <vault> <preparation-file> <new-signed-output-file>
+source: poc:register-portable -- <signed-output-file>
+source: activate:public -- <address>
+```
+
+The source imports the exact user-signed genesis and Address Binding before
+`activate:public` verifies public HTTPS WebFinger and binding retrieval. Here
+`activate:public` describes the **external HTTPS address verification**,
+not registration on the public PLC network. The source stores its own
+operational keys but neither user private key. Existing custodial POC DIDs
+cannot be reused for this profile.
+
+After the user signs/submits a Transfer Grant and selects an address at the
+other POC provider, use `migration:export` on the fenced source:
+
+```text
+client: poc:sign-cutover -- <vault> <snapshot> <origin-verified-offer> <signed-reservation> <new-consent> <new-plc-operation> <new-binding>
+target: migration:stage -- <snapshot> <consent> <plc-operation> <binding>
+target: poc:submit-cutover -- <transfer-id>
+target: poc:publish-address -- <transfer-id>
+target: poc:activate-transfer -- <transfer-id> <new-receipt-file>
+source: poc:retire-source -- <did> <transfer-id> <receipt-file>
+```
+
+The client signs the exact PLC cutover, consent and Address Binding; the
+source verifies the target's activation receipt before retiring. Signed files must
+be private mode `0600`, transferred over an authenticated administrative
+channel, and kept apart from the provider-held user vault/recovery secret.
+No signed cutover is submitted automatically by starting the web server.

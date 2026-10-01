@@ -25,6 +25,7 @@ import { DeliveryStatusSigner } from "../src/delivery/status.js";
 import { TerminalStatusPublisher } from "../src/delivery/status-publisher.js";
 import { OnboardingRepository } from "../src/onboarding/repository.js";
 import { PortableCutoverGate, type IndependentPlcObserver } from "../src/migration/cutover-gate.js";
+import { PrivatePocCutoverGate } from "../src/migration/poc-cutover-gate.js";
 import { signMonitorAttestation } from "../src/migration/monitor-attestation.js";
 import { PreparedMigrationTarget } from "../src/migration/target-keys.js";
 import { PortableMigrationActivation } from "../src/migration/activation.js";
@@ -774,6 +775,49 @@ integration("fenced transfer and concurrent cutover", () => {
       SELECT state FROM pending_migration_imports WHERE transfer_id = ${fence.transferId}`;
     expect(intact[0]?.state).toBe("staged");
     await expect(fenceService.releaseBeforeExport(did, fence.transferId)).rejects.toThrow("unexported");
+  });
+
+  it("labels a private PLC cutover without treating the single reader as independent", async () => {
+    const fence = (await fenceService.get(did))!;
+    const rows = await target.sql<{ manifest_bytes: Uint8Array }[]>`
+      SELECT manifest_bytes FROM pending_migration_imports WHERE transfer_id = ${fence.transferId}`;
+    const original = new Uint8Array(rows[0]!.manifest_bytes);
+    const manifest = JSON.parse(new TextDecoder().decode(original)) as {
+      tables: { portable_custody_evidence: { monitor_verification_mode: string }[] } };
+    manifest.tables.portable_custody_evidence[0]!.monitor_verification_mode = "poc-local";
+    const pocManifest = new TextEncoder().encode(JSON.stringify(manifest));
+    const updated = signedCutoverOperation;
+    const result = await validateOperationLog(did, [genesisOperation, updated]);
+    const cid = (await cidForCbor(updated)).toString();
+    const observer: IndependentPlcObserver = { origin: "http://plc.fixture:2582",
+      resolver: { async resolve() { return { did, identityDidKey: userIdentityPublicKey,
+        messagingDidKey: destinationMessagingPublicKey, serviceBase: targetBase,
+        evidence: { document: {}, data: result!, log: [genesisOperation, updated] } }; } },
+      async audit() { return [{ did, operation: updated, cid,
+        nullified: false, createdAt: new Date().toISOString() }]; },
+    };
+    expect(() => new PrivatePocCutoverGate(target.sql, observer,
+      "https://plc.directory", targetBase)).toThrow("pinned internal PLC");
+    try {
+      await target.sql`UPDATE pending_migration_imports SET manifest_bytes = ${pocManifest}
+        WHERE transfer_id = ${fence.transferId}`;
+      const pocGate = new PrivatePocCutoverGate(target.sql, observer,
+        "http://plc.fixture:2582", targetBase);
+      expect((await pocGate.assess(fence.transferId)).eligible).toBe(true);
+      const assessment = await target.sql<{ assessment_profile: string; mirror_origins: string | string[] }[]>`
+        SELECT assessment_profile, mirror_origins FROM portable_cutover_observations
+        WHERE transfer_id = ${fence.transferId}`;
+      expect(assessment[0]?.assessment_profile).toBe("private-poc");
+      expect(typeof assessment[0]?.mirror_origins === "string" ?
+        JSON.parse(assessment[0].mirror_origins) : assessment[0]?.mirror_origins)
+        .toEqual(["http://plc.fixture:2582"]);
+      const publicGate = new PortableCutoverGate(target.sql, [observer, observer]);
+      await expect(publicGate.assess(fence.transferId)).rejects.toThrow("signed independent monitor");
+    } finally {
+      await target.sql`DELETE FROM portable_cutover_observations WHERE transfer_id = ${fence.transferId}`;
+      await target.sql`UPDATE pending_migration_imports SET manifest_bytes = ${original}
+        WHERE transfer_id = ${fence.transferId}`;
+    }
   });
 
   it("requires matching independent PLC witnesses and monitor coverage throughout the recovery window", async () => {

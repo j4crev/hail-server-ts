@@ -28,7 +28,8 @@ export class PortableCutoverGate {
     private readonly now: () => Date = () => new Date(),
   ) {}
 
-  async assess(transferId: string, signedMonitor: SignedMonitorAttestation): Promise<CutoverAssessment> {
+  async assess(transferId: string, signedMonitor?: SignedMonitorAttestation): Promise<CutoverAssessment> {
+    if (!signedMonitor) throw new Error("Public cutover requires a signed independent monitor attestation");
     const imports = await this.sql<{ did: string; state: string; manifest_bytes: Uint8Array;
       signed_plc_operation_bytes: Uint8Array | null }[]>`
       SELECT did, state, manifest_bytes, signed_plc_operation_bytes
@@ -44,6 +45,9 @@ export class PortableCutoverGate {
     const expectedCid = (await cidForCbor(signedOperation)).toString();
     if (manifest.did !== pending.did || manifest.transferId !== transferId) throw new Error("Cutover import correlation failed");
     const custody = manifest.tables.portable_custody_evidence[0]!;
+    if (custody.monitor_verification_mode !== "independent") {
+      throw new Error("Public cutover requires independent monitor custody evidence");
+    }
     const now = this.now();
     const report = await verifyMonitorAttestation(signedMonitor, custody.monitor_public_key as string,
       Math.floor(now.getTime() / 1000));
@@ -109,14 +113,15 @@ export class PortableCutoverGate {
       await tx`
         INSERT INTO portable_cutover_observations
           (transfer_id, did, operation_cid, first_seen_at, last_seen_at,
-           mirror_origins, monitor_attestation_digest, state)
-        VALUES (${transferId}, ${manifest.did}, ${operationCid}, ${firstSeen}, ${now},
-          ${JSON.stringify(this.observers.map((observer) => observer.origin))}::jsonb,
-          ${attestationDigest}, 'eligible')
-        ON CONFLICT (transfer_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at,
-          mirror_origins = EXCLUDED.mirror_origins,
-          monitor_attestation_digest = EXCLUDED.monitor_attestation_digest,
-          state = EXCLUDED.state
+            mirror_origins, monitor_attestation_digest, state, assessment_profile)
+         VALUES (${transferId}, ${manifest.did}, ${operationCid}, ${firstSeen}, ${now},
+           ${JSON.stringify(this.observers.map((observer) => observer.origin))}::jsonb,
+           ${attestationDigest}, 'eligible', 'public')
+         ON CONFLICT (transfer_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at,
+           mirror_origins = EXCLUDED.mirror_origins,
+           monitor_attestation_digest = EXCLUDED.monitor_attestation_digest,
+           state = EXCLUDED.state
+         WHERE portable_cutover_observations.assessment_profile = 'public'
       `;
       return { eligible, operationCid, firstSeenAt: firstSeen, earliestEligibleAt: earliest };
     });

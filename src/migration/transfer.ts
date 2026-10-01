@@ -123,6 +123,7 @@ export function validateTransferManifest(bytes: Uint8Array): TransferManifest {
     typeof custody[0].user_recovery_public_key !== "string" ||
     typeof custody[0].user_identity_public_key !== "string" ||
     custody[0].user_identity_public_key === keys.find((key) => key.role === "hail-messaging")?.public_key ||
+    !["independent", "poc-local"].includes(String(custody[0].monitor_verification_mode)) ||
     typeof custody[0].monitor_origin !== "string" ||
     typeof custody[0].monitor_public_key !== "string" ||
     !custody[0].monitor_confirmed_at || !custody[0].backup_confirmed_at) {

@@ -8,6 +8,8 @@ import { importEd25519PrivateKey } from "../identity/keys.js";
 import type { HailDidResolver } from "../plc/resolver.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { PortableCutoverGate } from "./cutover-gate.js";
+import { PrivatePocCutoverGate } from "./poc-cutover-gate.js";
+import { assertPrivatePocRegistry } from "./poc-profile.js";
 import type { SignedMonitorAttestation } from "./monitor-attestation.js";
 import { PreparedMigrationTarget } from "./target-keys.js";
 import { validateTransferManifest, type TransferManifest } from "./transfer.js";
@@ -32,11 +34,12 @@ export class PortableMigrationActivation {
     private readonly sql: SQL,
     private readonly encryptor: KeyEncryptor,
     private readonly resolver: HailDidResolver,
-    private readonly gate: PortableCutoverGate,
+    private readonly gate: Pick<PortableCutoverGate | PrivatePocCutoverGate, "assess">,
     private readonly addressVerifier: PortableAddressVerifier,
     private readonly serviceBase: string,
     private readonly registryOrigin: string,
     private readonly now: () => Date = () => new Date(),
+    private readonly profile: "public" | "private-poc" = "public",
   ) {}
 
   async issueReceipt(transferId: string): Promise<SignedActivationReceipt> {
@@ -73,12 +76,13 @@ export class PortableMigrationActivation {
     } finally { plaintext.fill(0); }
   }
 
-  async activate(transferId: string, signedMonitor: SignedMonitorAttestation): Promise<{ did: string; accountId: string }> {
-    if (this.registryOrigin !== "https://plc.directory") {
+  async activate(transferId: string, signedMonitor?: SignedMonitorAttestation): Promise<{ did: string; accountId: string }> {
+    if (this.profile === "public" && this.registryOrigin !== "https://plc.directory") {
       throw new Error("Portable activation requires the canonical public PLC write registry");
     }
+    if (this.profile === "private-poc") assertPrivatePocRegistry(this.registryOrigin, this.serviceBase);
     const assessment = await this.gate.assess(transferId, signedMonitor);
-    if (!assessment.eligible) throw new Error("PLC recovery quarantine has not completed");
+    if (!assessment.eligible) throw new Error("PLC cutover assessment is not eligible");
     const imports = await this.sql<{ state: string; did: string; manifest_bytes: Uint8Array;
       destination_binding_cose: Uint8Array; destination_binding_digest: Uint8Array;
       destination_address: string; signed_plc_operation_bytes: Uint8Array }[]>`
@@ -89,6 +93,10 @@ export class PortableMigrationActivation {
     const pending = imports[0];
     if (!pending || pending.state !== "staged") throw new Error("No inactive validated transfer to activate");
     const manifest = validateTransferManifest(pending.manifest_bytes);
+    if (manifest.tables.portable_custody_evidence[0]?.monitor_verification_mode !==
+      (this.profile === "public" ? "independent" : "poc-local")) {
+      throw new Error("Cutover evidence does not match the selected PLC trust profile");
+    }
     if (manifest.did !== pending.did || manifest.destinationServiceBase !== this.serviceBase ||
       manifest.transferId !== transferId ||
       assessment.operationCid !== (await this.currentOperationCid(pending.signed_plc_operation_bytes))) {
@@ -141,12 +149,14 @@ export class PortableMigrationActivation {
       const preparedKeys = await tx<{ state: string }[]>`
         SELECT state FROM prepared_migration_target_keys WHERE transfer_id = ${transferId} FOR UPDATE
       `;
-      const gate = await tx<{ state: string; last_seen_at: Date; operation_cid: string }[]>`
-        SELECT state, last_seen_at, operation_cid FROM portable_cutover_observations
+      const gate = await tx<{ state: string; last_seen_at: Date; operation_cid: string;
+        assessment_profile: string }[]>`
+        SELECT state, last_seen_at, operation_cid, assessment_profile FROM portable_cutover_observations
         WHERE transfer_id = ${transferId} FOR UPDATE
       `;
       if (importsLocked[0]?.state !== "staged" || preparedKeys[0]?.state !== "staged" ||
         gate[0]?.state !== "eligible" ||
+        gate[0].assessment_profile !== this.profile ||
         gate[0].operation_cid !== assessment.operationCid ||
         Math.abs(this.now().getTime() - gate[0].last_seen_at.getTime()) > 30_000) {
         throw new Error("Current cutover eligibility was lost before materialization");
@@ -159,6 +169,20 @@ export class PortableMigrationActivation {
       if (!reserved[0]?.reserved_account_id || reserved[0].canonical_address !== pending.destination_address ||
         reserved[0].state !== "submitted") {
         throw new Error("Destination address reservation was lost before activation");
+      }
+      const provisional = await tx<{ cose: Uint8Array; representation_digest: Uint8Array }[]>`
+        SELECT cose, representation_digest FROM address_bindings
+        WHERE account_id = ${reserved[0].reserved_account_id}
+          AND canonical_address = ${pending.destination_address} AND did = ${manifest.did}
+        FOR UPDATE`;
+      if (this.profile === "private-poc" && (provisional.length !== 1 ||
+        !Buffer.from(provisional[0]!.cose).equals(Buffer.from(pending.destination_binding_cose)) ||
+        !Buffer.from(provisional[0]!.representation_digest).equals(Buffer.from(pending.destination_binding_digest)))) {
+        throw new Error("Private POC address was not published under the reserved account");
+      }
+      if (provisional.length) {
+        await tx`DELETE FROM address_bindings WHERE account_id = ${reserved[0].reserved_account_id}
+          AND canonical_address = ${pending.destination_address} AND did = ${manifest.did}`;
       }
       const released = await tx`DELETE FROM provider_accounts WHERE id = ${reserved[0].reserved_account_id}
         AND canonical_address = ${pending.destination_address} AND did IS NULL

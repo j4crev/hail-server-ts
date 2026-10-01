@@ -591,7 +591,7 @@ were healthy with zero unexpected restarts and no application errors.
 ### Portable-Custody Development Boundary
 
 Provider source after the deployed hardening runtime includes **local-only**
-migrations 13–28, the fenced transfer handshake rehearsal and user-owned key/monitor
+migrations 13–30, the fenced transfer handshake rehearsal and user-owned key/monitor
 interfaces. The VPS still runs provider runtime `021dced` with migration 12 on
 both databases. Do **not** rebuild or restart public providers from the newer
 source expecting a portable production migration: startup automatically
@@ -606,8 +606,22 @@ monitor). No independently hosted monitor, verified public PLC export
 checkpoint, real user-domain transfer or public `plc.directory` portable DID
 has yet been deployed. The full trust and rollout boundary is recorded in
 `/opt/hail-poc/hailproto/docs/production-portable-custody.md` when that guide
-is installed; the older deployed runtime remains the supported public POC
-until those production prerequisites pass.
+is installed. The older deployed runtime remains the supported live POC until
+a separate, backed-up private-PLC release is deliberately rolled out.
+
+The private-PLC POC profile can rehearse **new** user-key-held identities on
+this internal registry, using one canonical validated reader explicitly
+labeled `private-poc`/`poc-local`. It cannot convert existing custodial DIDs
+or establish independent public-registry finality. On 2026-10-01 both live
+provider databases were backed up under
+`/var/backups/hail-poc/pre-private-poc-20261001T215237Z` and restored to
+isolated `hail_private_stage` copies. Migrations 13–30 applied successfully
+to both copies. Two read-only schema-rehearsal provider containers returned
+`200` readiness and served Alice's/Bob's cloned WebFinger records with HTTP
+`200`; the **live** databases and runtime remained at migration 12 and
+`021dced` after this rehearsal. The staging containers expose no public
+ports and run no background workers. Take a fresh backup and preserve the
+old image before any later live POC update.
 Eight external HTTPS samples per protected generic path showed medians of
 782 ms for both malformed envelope submission and unknown status push;
 95th-percentile samples were 857 and 859 ms including network variance.

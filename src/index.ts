@@ -62,9 +62,15 @@ const invitationDelivery = new TransferInvitationDelivery(database.sql, resolver
 const transferWorker = new TransferDeliveryWorker(database.sql, invitationDelivery, finalTransferPublisher);
 const transferRateLimit = new TransferRateLimit(database.sql);
 const transferCleanup = new TransferCleanup(database.sql, transferRateLimit);
+const schemaRehearsal = process.env.POC_SCHEMA_REHEARSAL === "true";
+if (schemaRehearsal && (config.plcDirectoryUrl !== "http://plc:2582" ||
+  !config.databaseUrl.endsWith("/hail_private_stage"))) {
+  throw new Error("POC schema rehearsal must use the internal PLC and isolated database clone");
+}
 
 await database.migrate();
 
+if (!schemaRehearsal) {
 let publicationRunning = false;
 setInterval(async () => {
   if (publicationRunning) return;
@@ -127,8 +133,17 @@ setInterval(async () => {
       error: error instanceof Error ? error.message : "unknown error" }));
   } finally { deliveryRunning = false; }
 }, 5_000);
+}
 
-const app = createApp(config, {
+const checkReadiness = async () => {
+  await Promise.all([database.ping(), plc.health()]);
+  return { ready: true };
+};
+const app = createApp(config, schemaRehearsal ? {
+  discoveryStore: onboardingRepository,
+  senderProfileStore: onboardingRepository,
+  checkReadiness,
+} : {
   discoveryStore: onboardingRepository,
   senderProfileStore: onboardingRepository,
   grantReceiver: new GrantReceiver(
@@ -157,10 +172,7 @@ const app = createApp(config, {
   transferCancellation: new TransferCancellationService(database.sql, resolver, config.hailServiceBase,
     onboardingRepository, new KeyEncryptor(config.keyEncryptionKey)),
   transferCancellationReceiver: new TransferCancellationReceiver(database.sql, resolver, config.hailServiceBase),
-  async checkReadiness() {
-    await Promise.all([database.ping(), plc.health()]);
-    return { ready: true };
-  },
+  checkReadiness,
 });
 
 console.info(
