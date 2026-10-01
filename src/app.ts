@@ -14,6 +14,11 @@ import type { DeliveryStatusSigner } from "./delivery/status.js";
 import { registerDeliveryStatusRoutes } from "./delivery/status-routes.js";
 import type { DeliveryStatusReceiver } from "./delivery/status-receiver.js";
 import { ProtectedResponseSchedule } from "./http/protected-schedule.js";
+import { registerTransferRoutes } from "./migration/routes.js";
+import type { TransferInvitationReceiver } from "./migration/invitation-receiver.js";
+import type { TransferAddressReservation } from "./migration/address-selection.js";
+import type { TransferFinalRequestPublisher } from "./migration/final-request-publisher.js";
+import type { MigrationFenceService } from "./migration/fence.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -28,6 +33,10 @@ export interface AppDependencies {
   envelopeReceiver?: EnvelopeReceiver;
   deliveryStatusSigner?: DeliveryStatusSigner;
   deliveryStatusReceiver?: DeliveryStatusReceiver;
+  transferInvitationReceiver?: TransferInvitationReceiver;
+  transferAddressReservation?: TransferAddressReservation;
+  transferFinalRequestPublisher?: TransferFinalRequestPublisher;
+  migrationFence?: MigrationFenceService;
 }
 
 const defaultDependencies: AppDependencies = {
@@ -57,6 +66,8 @@ export function createApp(
     dependencies.deliveryStatusSigner, protectedSchedule);
   if (dependencies.deliveryStatusReceiver) registerDeliveryStatusRoutes(app, dependencies.deliveryStatusReceiver,
     protectedSchedule);
+  if (dependencies.transferInvitationReceiver) registerTransferRoutes(app, dependencies.transferInvitationReceiver,
+    dependencies.transferAddressReservation, dependencies.migrationFence, dependencies.transferFinalRequestPublisher);
 
   app.get("/health/live", (context) =>
     context.json({

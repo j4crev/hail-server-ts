@@ -6,6 +6,7 @@ import { createWebCryptoSigner, encodeBase64Url, inspectSignedPayload, signPaylo
 import * as dagCbor from "@ipld/dag-cbor";
 import { base58btc } from "multiformats/bases/base58";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { Hono } from "hono";
 import type { ProviderDatabase } from "../src/db/database.js";
 import { BodyRepository } from "../src/bodies/repository.js";
 import { bodyFromText } from "../src/bodies/service.js";
@@ -27,6 +28,15 @@ import { PortableCutoverGate, type IndependentPlcObserver } from "../src/migrati
 import { signMonitorAttestation } from "../src/migration/monitor-attestation.js";
 import { PreparedMigrationTarget } from "../src/migration/target-keys.js";
 import { PortableMigrationActivation } from "../src/migration/activation.js";
+import { handshakeDigest, signHandshake, TransferInvitationService, type SignedHandshake,
+  type TransferGrant, type TransferAddressSelection } from "../src/migration/handshake.js";
+import { TransferInvitationReceiver } from "../src/migration/invitation-receiver.js";
+import { TransferInvitationDelivery } from "../src/migration/invitation-delivery.js";
+import { TransferAddressReservation } from "../src/migration/address-selection.js";
+import { TransferFinalRequestPublisher } from "../src/migration/final-request-publisher.js";
+import { registerTransferRoutes } from "../src/migration/routes.js";
+import { invitationWire, TRANSFER_MEDIA_TYPE } from "../src/migration/wire.js";
+import { decodeDeterministic } from "@hailproto/codec";
 import { DeliveryWorker } from "../src/delivery/worker.js";
 
 const integration = process.env.DATABASE_URL && process.env.TRANSFER_TARGET_DATABASE_URL ? describe : describe.skip;
@@ -71,6 +81,18 @@ integration("fenced transfer and concurrent cutover", () => {
   let destinationBinding: Uint8Array;
   let cutoverClock: number;
   let targetGate: PortableCutoverGate;
+  let signedRequest: SignedHandshake;
+  let signedOffer: SignedHandshake;
+  let signedSelection: SignedHandshake;
+  let signedReservation: SignedHandshake;
+  let userGrant: SignedHandshake;
+  let invitation: SignedHandshake;
+  let destinationRoutes: Hono;
+  let sourceRoutes: Hono;
+  let originDelivery: TransferInvitationDelivery;
+  let addressReservation: TransferAddressReservation;
+  let targetPublisher: TransferFinalRequestPublisher;
+  const selectedAddress = `alice-${id}@target.example.com`;
 
   beforeAll(async () => {
     const { ProviderDatabase } = await import("../src/db/database.js");
@@ -92,10 +114,6 @@ integration("fenced transfer and concurrent cutover", () => {
     const operation = await signOperation(unsigned, userRecovery);
     genesisOperation = operation;
     did = await didForCreateOp(operation);
-    const prepared = await new PreparedMigrationTarget(target.sql, targetEncryption, targetBase).prepare(did);
-    targetTransferId = prepared.transferId;
-    destinationRotationPublicKey = prepared.rotationPublicKey;
-    destinationMessagingPublicKey = prepared.messagingPublicKey;
     const operationCid = (await cidForCbor(operation)).toString();
     const expectedState = { did, rotationKeys: unsigned.rotationKeys,
       verificationMethods: unsigned.verificationMethods, alsoKnownAs: unsigned.alsoKnownAs,
@@ -196,6 +214,34 @@ integration("fenced transfer and concurrent cutover", () => {
     const plaintext = await encryption.decrypt(id, key.role, key.algorithm, key.publicKey, key);
     const privateKey = await importEd25519PrivateKey(plaintext);
     plaintext.fill(0);
+    const transferGrant: TransferGrant = { type: "hail.transfer-grant", version: 1, did,
+      nonce: randomUUID(), source_service_base: sourceBase, destination_service_base: targetBase,
+      destination_domain: "target.example.com",
+      issued_at: now, expires_at: now + 3600 };
+    userGrant = await signHandshake(transferGrant, identityPrivateKey);
+    invitation = await new TransferInvitationService(source.sql, resolver, sourceBase)
+      .issue(userGrant, privateKey);
+    const preparedTarget = new PreparedMigrationTarget(target.sql, targetEncryption, targetBase);
+    const receiver = new TransferInvitationReceiver(target.sql, resolver, preparedTarget);
+    addressReservation = new TransferAddressReservation(target.sql, resolver, preparedTarget);
+    sourceRoutes = new Hono();
+    registerTransferRoutes(sourceRoutes, new TransferInvitationReceiver(source.sql, resolver,
+      new PreparedMigrationTarget(source.sql, encryption, sourceBase)), undefined, fenceService);
+    targetPublisher = new TransferFinalRequestPublisher(target.sql, resolver, preparedTarget,
+      async (request) => sourceRoutes.fetch(request),
+      (url) => { if (url.href !== `${sourceBase}/transfers/requests`) throw new Error("Wrong source origin"); });
+    destinationRoutes = new Hono();
+    registerTransferRoutes(destinationRoutes, receiver, addressReservation, undefined, targetPublisher);
+    originDelivery = new TransferInvitationDelivery(source.sql, resolver, sourceBase,
+      async (request) => destinationRoutes.fetch(request),
+      (url) => { if (url.href !== "https://target.example.com/.well-known/hail/transfers/invitations")
+        throw new Error("Wrong target origin"); });
+    signedOffer = await originDelivery.deliver(did);
+    const requestRecord = decodeDeterministic(signedOffer.payloadBytes) as unknown as {
+      transfer_id: string; destination_rotation_key: string; destination_messaging_key: string };
+    targetTransferId = requestRecord.transfer_id;
+    destinationRotationPublicKey = requestRecord.destination_rotation_key;
+    destinationMessagingPublicKey = requestRecord.destination_messaging_key;
     const profile: HailSenderProfile = {
       type: "hail.sender-profile", version: 1, did, revision: 1,
       display_name: "Transfer Fixture", offers_uncategorized: false,
@@ -271,6 +317,161 @@ integration("fenced transfer and concurrent cutover", () => {
     if (target) await target.close();
   });
 
+  it("rejects an unauthenticated destination request before fencing", async () => {
+    const forged = { payloadBytes: signedOffer.payloadBytes,
+      signature: Uint8Array.from(signedOffer.signature) };
+    forged.signature[0]! ^= 1;
+    await expect(fenceService.begin(forged, forged, forged)).rejects.toThrow();
+    expect(await fenceService.get(did)).toBeNull();
+  });
+
+  it("does not replace the stored user grant with a provider-signed authorization", async () => {
+    const payload: TransferGrant = { type: "hail.transfer-grant", version: 1, did,
+      nonce: randomUUID(), source_service_base: sourceBase, destination_service_base: targetBase,
+      destination_domain: "target.example.com",
+      issued_at: Math.floor(Date.now() / 1000), expires_at: Math.floor(Date.now() / 1000) + 300 };
+    const providerKey = (await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"])) as CryptoKeyPair;
+    const forgery = await signHandshake(payload, providerKey.privateKey);
+    await expect(new TransferInvitationService(source.sql, resolver, sourceBase)
+      .issue(forgery, providerKey.privateKey)).rejects.toThrow("signature is invalid");
+    expect(await fenceService.get(did)).toBeNull();
+  });
+
+  it("requires the signed request to be observed at the authorized HTTPS origin", async () => {
+    await source.sql`UPDATE provider_transfer_authorizations
+      SET origin_request_bytes = NULL, origin_request_signature = NULL, origin_confirmed_at = NULL
+      WHERE did = ${did}`;
+    try {
+      await expect(fenceService.begin(signedOffer, signedOffer, signedOffer)).rejects.toThrow("authenticated destination-origin");
+      const badRedirect = new TransferInvitationDelivery(source.sql, resolver, sourceBase,
+        async () => new Response(null, { status: 307, headers: { Location: "https://other.example.com" } }),
+        (url) => { expect(url.href).toBe("https://target.example.com/.well-known/hail/transfers/invitations"); });
+      await expect(badRedirect.deliver(did)).rejects.toThrow("did not acknowledge");
+      const oversized = new TransferInvitationDelivery(source.sql, resolver, sourceBase,
+        async () => new Response("x".repeat(20_000), { status: 200,
+          headers: { "Content-Type": TRANSFER_MEDIA_TYPE } }),
+        (url) => { expect(url.href).toBe("https://target.example.com/.well-known/hail/transfers/invitations"); });
+      await expect(oversized.deliver(did)).rejects.toThrow("exceeds limit");
+      const ambiguous = new TransferInvitationDelivery(source.sql, resolver, sourceBase,
+        async (request) => {
+          const received = await destinationRoutes.fetch(request);
+          expect(received.status).toBe(200);
+          throw new Error("Connection lost after destination preparation");
+        }, (url) => { expect(url.href).toBe("https://target.example.com/.well-known/hail/transfers/invitations"); });
+      await expect(ambiguous.deliver(did)).rejects.toThrow("Connection lost");
+      const rows = await source.sql<{ origin_confirmed_at: Date | null }[]>`
+        SELECT origin_confirmed_at FROM provider_transfer_authorizations WHERE did = ${did}`;
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.origin_confirmed_at).toBeNull();
+    } finally {
+      expect(await originDelivery.deliver(did)).toEqual(signedOffer);
+      expect(await target.sql`SELECT transfer_id FROM prepared_migration_target_keys WHERE did = ${did}`)
+        .toHaveLength(1);
+    }
+  });
+
+  it("returns the exact signed destination acceptance on retry and rejects forged invitations", async () => {
+    const body = invitationWire(userGrant, invitation);
+    const repeat = await destinationRoutes.request("https://target.example.com/.well-known/hail/transfers/invitations",
+      { method: "POST", headers: { "Content-Type": TRANSFER_MEDIA_TYPE }, body: Uint8Array.from(body) });
+    expect(repeat.status).toBe(200);
+    const { parseRequestWire } = await import("../src/migration/wire.js");
+    expect(parseRequestWire(new Uint8Array(await repeat.arrayBuffer()))).toEqual(signedOffer);
+    const keys = await target.sql`SELECT transfer_id FROM prepared_migration_target_keys WHERE did = ${did}`;
+    expect(keys).toHaveLength(1);
+    const forgedInvitation = { payloadBytes: invitation.payloadBytes,
+      signature: Uint8Array.from(invitation.signature) };
+    forgedInvitation.signature[0]! ^= 1;
+    const rejected = await destinationRoutes.request("https://target.example.com/.well-known/hail/transfers/invitations",
+      { method: "POST", headers: { "Content-Type": TRANSFER_MEDIA_TYPE },
+        body: Uint8Array.from(invitationWire(userGrant, forgedInvitation)) });
+    expect(rejected.status).toBe(400);
+    expect(await target.sql`SELECT transfer_id FROM prepared_migration_target_keys WHERE did = ${did}`)
+      .toHaveLength(1);
+  });
+
+  it("fails closed on an invitation destination mismatch or expired grant", async () => {
+    try {
+      await source.sql`UPDATE provider_transfer_authorizations
+        SET destination_service_base = 'https://other.example.com/hail' WHERE did = ${did}`;
+      await expect(originDelivery.deliver(did)).rejects.toThrow("does not match the current user grant");
+      await source.sql`UPDATE provider_transfer_authorizations
+        SET destination_service_base = ${targetBase}, expires_at = now() - interval '1 second' WHERE did = ${did}`;
+      await expect(fenceService.begin(signedOffer, signedOffer, signedOffer))
+        .rejects.toThrow("No valid user-authorized invitation");
+    } finally {
+      const original = await source.sql<{ grant_bytes: Uint8Array }[]>`
+        SELECT grant_bytes FROM provider_transfer_authorizations WHERE did = ${did}`;
+      const { decodeDeterministic } = await import("@hailproto/codec");
+      const grant = decodeDeterministic(original[0]!.grant_bytes) as unknown as TransferGrant;
+      await source.sql`UPDATE provider_transfer_authorizations
+        SET destination_service_base = ${targetBase}, expires_at = to_timestamp(${grant.expires_at})
+        WHERE did = ${did}`;
+    }
+    expect(await fenceService.get(did)).toBeNull();
+  });
+
+  it("authenticates address selection directly at the new provider and atomically reserves its domain", async () => {
+    const grant = decodeDeterministic(userGrant.payloadBytes) as unknown as TransferGrant;
+    const now = Math.floor(Date.now() / 1000);
+    const selected: TransferAddressSelection = {
+      type: "hail.transfer-address-selection", version: 1, did, nonce: grant.nonce,
+      transfer_id: targetTransferId, grant_digest: handshakeDigest(userGrant.payloadBytes),
+      offer_digest: handshakeDigest(signedOffer.payloadBytes), address: selectedAddress,
+      selection_nonce: randomUUID(), issued_at: now, expires_at: now + 1800,
+    };
+    const forgedKey = (await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"])) as CryptoKeyPair;
+    const forged = await signHandshake(selected, forgedKey.privateKey);
+    await expect(addressReservation.reserve(forged)).rejects.toThrow("signature is invalid");
+    const rotatedBytes = new Uint8Array(34);
+    rotatedBytes.set([0xed, 0x01]);
+    rotatedBytes.set(new Uint8Array(await crypto.subtle.exportKey("raw", forgedKey.publicKey)), 2);
+    const rotatedIdentity = `did:key:${base58btc.encode(rotatedBytes)}`;
+    const rotatedResolver: HailDidResolver = { async resolve(value) {
+      return { ...(await resolver.resolve(value)), identityDidKey: rotatedIdentity };
+    } };
+    const rotatedSelection = await signHandshake(selected, forgedKey.privateKey);
+    await expect(new TransferAddressReservation(target.sql, rotatedResolver,
+      new PreparedMigrationTarget(target.sql, targetEncryption, targetBase))
+      .reserve(rotatedSelection)).rejects.toThrow("signature is invalid");
+    const wrongDomain = await signHandshake({ ...selected, address: "alice@other.example.com" }, identityPrivateKey);
+    await expect(addressReservation.reserve(wrongDomain)).rejects.toThrow("not for this provider");
+    const occupiedId = randomUUID();
+    await target.sql`INSERT INTO provider_accounts (id, tenant_id, canonical_address, onboarding_state)
+      VALUES (${occupiedId}, ${randomUUID()}, ${selectedAddress}, 'reserved')`;
+    signedSelection = await signHandshake(selected, identityPrivateKey);
+    try { await expect(addressReservation.reserve(signedSelection)).rejects.toThrow("Address not available"); }
+    finally { await target.sql`DELETE FROM provider_accounts WHERE id = ${occupiedId}`; }
+    const competingSelection = await signHandshake({ ...selected, selection_nonce: randomUUID() }, identityPrivateKey);
+    const race = await Promise.allSettled([
+      addressReservation.reserve(signedSelection), addressReservation.reserve(competingSelection),
+    ]);
+    expect(race.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(race.filter((result) => result.status === "rejected")).toHaveLength(1);
+    if (race[1]?.status === "fulfilled") signedSelection = competingSelection;
+    const clientFacingRoutes = new Hono();
+    const ambiguousPublisher = { async publish() {
+      throw new Error("Target-to-source response temporarily ambiguous");
+    } };
+    registerTransferRoutes(clientFacingRoutes, new TransferInvitationReceiver(target.sql, resolver,
+      new PreparedMigrationTarget(target.sql, targetEncryption, targetBase)),
+    addressReservation, undefined, ambiguousPublisher);
+    const { requestWire, parseRequestWire } = await import("../src/migration/wire.js");
+    const chosen = await clientFacingRoutes.request("https://target.example.com/.well-known/hail/transfers/reservations",
+      { method: "POST", headers: { "Content-Type": TRANSFER_MEDIA_TYPE },
+        body: Uint8Array.from(requestWire(signedSelection)) });
+    expect(chosen.status).toBe(202);
+    signedReservation = parseRequestWire(new Uint8Array(await chosen.arrayBuffer()));
+    const reserved = await addressReservation.reserve(signedSelection);
+    expect(reserved.receipt).toEqual(signedReservation);
+    expect((await addressReservation.reserve(signedSelection)).receipt).toEqual(signedReservation);
+    await expect(new OnboardingRepository(target.sql).reserve(selectedAddress))
+      .rejects.toThrow("held for a provider transfer");
+    expect(await fenceService.get(did)).toBeNull();
+    expect(await target.sql`SELECT transfer_id FROM transfer_address_reservations
+      WHERE canonical_address = ${selectedAddress}`).toHaveLength(1);
+  });
+
   it("lets a committed writer win before the exclusive account-row fence", async () => {
     const work = new DeliveryRepository(source.sql);
     claimedDelivery = (await work.claimDue())!;
@@ -303,20 +504,54 @@ integration("fenced transfer and concurrent cutover", () => {
     });
     await locked;
     let fenced = false;
-    const pending = fenceService.begin(did, targetBase,
-      destinationRotationPublicKey, destinationMessagingPublicKey, targetTransferId)
-      .then((value) => { fenced = true; return value; });
+    const pending = targetPublisher.publish(targetTransferId)
+      .then(async () => { fenced = true; return fenceService.get(did); });
     await new Promise((resolve) => setTimeout(resolve, 35));
     expect(fenced).toBe(false);
     release();
     await writer;
     const fence = await pending;
-    expect(fence.state).toBe("fenced");
+    expect(fence?.state).toBe("fenced");
+    const final = await target.sql<{ final_request_bytes: Uint8Array;
+      final_request_signature: Uint8Array }[]>`
+        SELECT final_request_bytes, final_request_signature FROM received_transfer_invitations
+        WHERE transfer_id = ${targetTransferId}`;
+    signedRequest = { payloadBytes: final[0]!.final_request_bytes,
+      signature: final[0]!.final_request_signature };
+    expect(await fenceService.previouslyAccepted(signedRequest, signedSelection, signedReservation)).toBe(true);
     releaseResponse();
     await expect(inFlightPublication).rejects.toThrow("migration-fenced");
     const account = await source.sql<{ state_version: number }[]>`
       SELECT state_version FROM provider_accounts WHERE id = ${id}`;
     expect(account[0]?.state_version).toBe(2);
+  });
+
+  it("acknowledges an exact final-request retry without another fence or address change", async () => {
+    const fencedBefore = await source.sql<{ state: string; transfer_id: string }[]>`
+      SELECT state, transfer_id FROM provider_migration_fences WHERE did = ${did}`;
+    await expect(targetPublisher.publish(targetTransferId)).resolves.toBeUndefined();
+    const fencedAfter = await source.sql<{ state: string; transfer_id: string }[]>`
+      SELECT state, transfer_id FROM provider_migration_fences WHERE did = ${did}`;
+    expect(fencedAfter).toHaveLength(1);
+    expect(fencedAfter[0]).toMatchObject({ state: fencedBefore[0]!.state,
+      transfer_id: fencedBefore[0]!.transfer_id });
+    const changedSelection = await signHandshake({
+      ...(decodeDeterministic(signedSelection.payloadBytes) as unknown as TransferAddressSelection),
+      address: "other@target.example.com", selection_nonce: randomUUID(),
+    }, identityPrivateKey);
+    const { finalRequestWire } = await import("../src/migration/wire.js");
+    const rejected = await sourceRoutes.request("https://source.example.com/hail/transfers/requests",
+      { method: "POST", headers: { "Content-Type": TRANSFER_MEDIA_TYPE },
+        body: Uint8Array.from(finalRequestWire(changedSelection, signedReservation, signedRequest)) });
+    expect(rejected.status).toBe(400);
+    expect(await fenceService.previouslyAccepted(signedRequest, changedSelection, signedReservation)).toBe(false);
+    const forgedReceipt = { payloadBytes: signedReservation.payloadBytes,
+      signature: Uint8Array.from(signedReservation.signature) };
+    forgedReceipt.signature[0]! ^= 1;
+    const rejectedReceipt = await sourceRoutes.request("https://source.example.com/hail/transfers/requests",
+      { method: "POST", headers: { "Content-Type": TRANSFER_MEDIA_TYPE },
+        body: Uint8Array.from(finalRequestWire(signedSelection, forgedReceipt, signedRequest)) });
+    expect(rejectedReceipt.status).toBe(400);
   });
 
   it("blocks admissions, Grant changes, reply claims and worker/publication writes after the fence", async () => {
@@ -370,7 +605,7 @@ integration("fenced transfer and concurrent cutover", () => {
     await expect(fenceService.releaseBeforeExport(did, randomUUID())).rejects.toThrow("matching");
   });
 
-  it("refuses to fence a custodial source without a user-controlled identity and top recovery key", async () => {
+  it("refuses to redirect an authorized request to a different custodial source", async () => {
     const custodialDid = `did:plc:${"c".repeat(24)}`;
     const custodialId = randomUUID();
     await source.sql`
@@ -386,8 +621,8 @@ integration("fenced transfer and concurrent cutover", () => {
     } };
     try {
       await expect(new MigrationFenceService(source.sql, bogusResolver, sourceBase)
-        .begin(custodialDid, targetBase, destinationRotationPublicKey, destinationMessagingPublicKey, randomUUID()))
-        .rejects.toThrow("portable custody");
+        .begin(signedRequest, signedSelection, signedReservation))
+        .rejects.toThrow("Current PLC state");
       expect(await source.sql`SELECT did FROM provider_migration_fences WHERE did = ${custodialDid}`).toHaveLength(0);
     } finally {
       await source.sql`DELETE FROM provider_accounts WHERE id = ${custodialId}`;
@@ -412,7 +647,7 @@ integration("fenced transfer and concurrent cutover", () => {
     const operationDigest = new Uint8Array(createHash("sha256").update(dagCbor.encode(signedCutover)).digest());
     const createdAt = Math.floor(Date.now() / 1000);
     const binding: HailAddressBinding = { type: "hail.address-binding", version: 1,
-      address: `alice-${id}@user.example.com`, did, issued_at: createdAt,
+      address: selectedAddress, did, issued_at: createdAt,
       expires_at: createdAt + 90 * 86400, key_id: `${did}#hail-identity` };
     destinationBinding = await signPayload("hail.address-binding", binding,
       createWebCryptoSigner(binding.key_id, identityPrivateKey));
@@ -521,11 +756,11 @@ integration("fenced transfer and concurrent cutover", () => {
       observed_at: Math.floor(cutoverClock / 1000),
     }, monitorPrivateKey);
     const initial = await targetGate.assess(fence.transferId, await report());
-    expect(initial.eligible).toBe(false);
-    expect(initial.earliestEligibleAt.getTime()).toBe(initial.firstSeenAt.getTime() + 72 * 3600 * 1000);
-    cutoverClock = initial.earliestEligibleAt.getTime() - 1000;
-    expect((await targetGate.assess(fence.transferId, await report())).eligible).toBe(false);
-    cutoverClock = initial.earliestEligibleAt.getTime() + 1000;
+    expect(initial.eligible).toBe(true);
+    expect(initial.earliestEligibleAt.getTime()).toBe(initial.firstSeenAt.getTime());
+    // Independent observations permit immediate activation. A delayed operator
+    // still has to fail previously accepted work whose original deadline expired.
+    cutoverClock += 2 * 3600 * 1000;
     expect((await targetGate.assess(fence.transferId, await report())).eligible).toBe(true);
     const targetAccount = await target.sql`SELECT id FROM provider_accounts WHERE did = ${did}`;
     expect(targetAccount).toHaveLength(0); // Assessment never activates an import.
@@ -572,9 +807,9 @@ integration("fenced transfer and concurrent cutover", () => {
     await expect(activation.activate(fence.transferId, await report())).rejects.toThrow("address does not select");
     expect(await target.sql`SELECT id FROM provider_accounts WHERE did = ${did}`).toHaveLength(0);
     matchAddress = true;
-    const occupiedId = randomUUID();
+    const occupiedId = id;
     await target.sql`INSERT INTO provider_accounts (id, tenant_id, canonical_address, onboarding_state)
-      VALUES (${occupiedId}, ${randomUUID()}, ${signedBinding.address}, 'reserved')`;
+      VALUES (${occupiedId}, ${randomUUID()}, ${`conflict-${id}@target.example.com`}, 'reserved')`;
     await expect(activation.activate(fence.transferId, await report())).rejects.toThrow();
     expect(await target.sql`SELECT id FROM provider_accounts WHERE did = ${did}`).toHaveLength(0);
     const pending = await target.sql<{ state: string }[]>`

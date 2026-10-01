@@ -118,6 +118,26 @@ const migrations: readonly Migration[] = [
     name: "migration-retirement-receipt",
     url: new URL("../../migrations/0021_migration_retirement_receipt.sql", import.meta.url),
   },
+  {
+    version: 22,
+    name: "transfer-handshake",
+    url: new URL("../../migrations/0022_transfer_handshake.sql", import.meta.url),
+  },
+  {
+    version: 23,
+    name: "transfer-origin-proof",
+    url: new URL("../../migrations/0023_transfer_origin_proof.sql", import.meta.url),
+  },
+  {
+    version: 24,
+    name: "transfer-address-selection",
+    url: new URL("../../migrations/0024_transfer_address_selection.sql", import.meta.url),
+  },
+  {
+    version: 25,
+    name: "transfer-grant-evidence",
+    url: new URL("../../migrations/0025_transfer_grant_evidence.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

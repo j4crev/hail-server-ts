@@ -201,24 +201,55 @@ continuity-preserving provider migration work remain outstanding.
 
 ## Portable Provider Cutover (Disposable Rehearsal)
 
-Migrations 13–21 add DID-scoped source write fences, authenticated immutable
+Migrations 13–25 add DID-scoped source write fences, authenticated immutable
 snapshots, destination-owned prepared operational keys, a signed user-consent
 and PLC operation check, and an inactive destination import. The activation
-service verifies an independently witnessed 72-hour recovery quarantine and
+service verifies two independently witnessed current PLC reads and monitor
+coverage for the exact top-user-key-signed operation, with no fixed wait, and
 the user's externally published Address Binding before importing all state in
 one transaction. It renews the Sender Profile with the destination messaging
 key, normalizes inherited leases, and gives the source a signed retirement
 receipt. The source never receives the destination private key; the snapshot
 contains **no encrypted private-key ciphertext** from the source.
 
+Before fencing, the source validates a user-identity-signed Transfer Grant
+naming a **provider domain**, derives that provider's fixed well-known HTTPS
+invitation endpoint, and sends a signed invitation. The destination verifies
+both signatures, prepares keys and returns an inactive signed **Transfer
+Offer** over TLS. The old provider retains origin proof of the offered key.
+The client then directly signs and submits its chosen address under that
+domain to the new provider, which reserves the address atomically in its
+local account namespace and returns a signed receipt. The new provider
+**pushes** a final Transfer Request, signed by the offered key, to the old
+provider's fixed endpoint. The source verifies the exact user selection and
+reservation and consumes the user grant
+atomically with the fence. Neither source messaging nor provider PLC keys can
+issue the user grant or sign the final top-recovery-key PLC operation.
+
 These commands are operator building blocks, **not a public migration
-procedure**: `migration:prepare-target` on the destination, then
-`migration:fence` and `migration:export` on the source, followed by
+procedure**: `transfer:grant` in `../hail-user-client-ts` produces a private
+signed domain grant; `migration:invite -- <grant-file> <invitation-file> <offer-file>`
+on the source validates/stores it, sends the invitation to the derived fixed
+well-known HTTPS endpoint, and saves the inactive origin-verified Offer.
+If delivery fails after grant issuance, retry with
+`migration:deliver-invitation -- <local-did> <new-offer-file>` rather than
+reissuing the still-live grant. The user reference client signs and sends an
+Address Selection directly to the new provider; its server reserves the
+address and pushes the final request to the old provider. An ambiguous
+push is retried from the target with `migration:publish-final -- <transfer-id>`.
+The old provider's final-request endpoint returns `204` only after it fences
+the DID; `migration:fence -- <final-request-file> <selection-file> <receipt-file>`
+is an operator diagnostic that still requires origin-proven offer state. Then
+run
+`migration:export` on the source and
 `migration:stage` with separate user-signed consent, exact signed PLC update,
 and fresh user-signed Address Binding. Export and consent files must be private
 (`0600`) and transferred over an authenticated administrative channel.
-There is no public PLC submission or activation CLI until independent monitor,
-mirror, vault, recovery and user-domain publication infrastructure exists.
+User-facing grant submission, automatic outbox retries, public
+PLC submission and activation CLIs are **not implemented**; an independent
+monitor, mirror/checkpoint, vault recovery and destination-domain publication still
+require production infrastructure. Do not deploy this rehearsal as a public
+transfer service.
 The current public POC accounts were created with custodial keys in a private
 directory and **must not be used as portable migration sources**. Separate
 reference projects now exist at `../hail-user-client-ts` for user-controlled

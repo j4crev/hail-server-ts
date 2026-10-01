@@ -386,6 +386,13 @@ export class MigrationTransferService {
       messagingPublicKey: manifest.destinationMessagingPublicKey,
     });
     await this.sql.begin(async (tx) => {
+      const reservation = await tx<{ canonical_address: string; state: string }[]>`
+        SELECT canonical_address, state FROM transfer_address_reservations
+        WHERE transfer_id = ${manifest.transferId} AND did = ${manifest.did} FOR UPDATE`;
+      if (reservation[0]?.canonical_address !== consent.destination_address ||
+        reservation[0].state !== "submitted") {
+        throw new Error("Destination address has no authenticated submitted reservation");
+      }
       const targetKey = await tx<{ state: string; did: string; rotation_public_key: string;
         messaging_public_key: string }[]>`
         SELECT state, did, rotation_public_key, messaging_public_key

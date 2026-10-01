@@ -153,6 +153,17 @@ export class PortableMigrationActivation {
       }
       const accounts = await tx<{ id: string }[]>`SELECT id FROM provider_accounts WHERE did = ${manifest.did}`;
       if (accounts.length) throw new Error("Target already has an active account for the DID");
+      const reserved = await tx<{ reserved_account_id: string | null; canonical_address: string; state: string }[]>`
+        SELECT reserved_account_id, canonical_address, state FROM transfer_address_reservations
+        WHERE transfer_id = ${transferId} AND did = ${manifest.did} FOR UPDATE`;
+      if (!reserved[0]?.reserved_account_id || reserved[0].canonical_address !== pending.destination_address ||
+        reserved[0].state !== "submitted") {
+        throw new Error("Destination address reservation was lost before activation");
+      }
+      const released = await tx`DELETE FROM provider_accounts WHERE id = ${reserved[0].reserved_account_id}
+        AND canonical_address = ${pending.destination_address} AND did IS NULL
+        AND onboarding_state = 'reserved' RETURNING id`;
+      if (released.length !== 1) throw new Error("Destination address was assigned elsewhere");
       await insertRow(tx, "provider_accounts", {
         ...manifest.tables.provider_accounts[0]!, canonical_address: pending.destination_address,
         activation_binding_digest: `\\x${Buffer.from(address.digest).toString("hex")}`,
@@ -221,6 +232,7 @@ export class PortableMigrationActivation {
       if (activated.length !== 1 || owned.length !== 1) {
         throw new Error("Destination ownership changed during activation");
       }
+      await tx`UPDATE transfer_address_reservations SET state = 'active' WHERE transfer_id = ${transferId}`;
       return { did: manifest.did, accountId: manifest.accountId };
     });
   }

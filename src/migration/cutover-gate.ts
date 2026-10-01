@@ -8,8 +8,6 @@ import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { validateTransferManifest } from "./transfer.js";
 import { verifyMonitorAttestation, type SignedMonitorAttestation } from "./monitor-attestation.js";
 
-const RECOVERY_WINDOW_MS = 72 * 60 * 60 * 1000;
-
 export interface IndependentPlcObserver {
   origin: string;
   resolver: HailDidResolver;
@@ -98,21 +96,23 @@ export class PortableCutoverGate {
       `;
       const existing = rows[0];
       if (existing && existing.operation_cid !== operationCid) {
-        throw new Error("PLC operation changed during the recovery quarantine");
+        throw new Error("PLC operation changed during the user-authorized cutover");
       }
       const firstSeen = existing?.first_seen_at ?? now;
       if (report.coverage_since > Math.floor(firstSeen.getTime() / 1000)) {
-        throw new Error("Independent monitoring coverage has a gap in the quarantine window");
+        throw new Error("Independent monitoring coverage has a gap in the cutover window");
       }
-      const earliest = new Date(firstSeen.getTime() + RECOVERY_WINDOW_MS);
-      const eligible = now >= earliest;
+      // stageImport already checked the exact operation against the user's index-zero PLC key.
+      // A lower-priority-signed operation cannot be staged through that path.
+      const earliest = firstSeen;
+      const eligible = true;
       await tx`
         INSERT INTO portable_cutover_observations
           (transfer_id, did, operation_cid, first_seen_at, last_seen_at,
            mirror_origins, monitor_attestation_digest, state)
         VALUES (${transferId}, ${manifest.did}, ${operationCid}, ${firstSeen}, ${now},
           ${JSON.stringify(this.observers.map((observer) => observer.origin))}::jsonb,
-          ${attestationDigest}, ${eligible ? "eligible" : "quarantined"})
+          ${attestationDigest}, 'eligible')
         ON CONFLICT (transfer_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at,
           mirror_origins = EXCLUDED.mirror_origins,
           monitor_attestation_digest = EXCLUDED.monitor_attestation_digest,

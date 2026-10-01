@@ -18,6 +18,11 @@ import { DeliveryStatusSigner } from "./delivery/status.js";
 import { DeliveryStatusReceiver } from "./delivery/status-receiver.js";
 import { TerminalStatusPublisher } from "./delivery/status-publisher.js";
 import { KeyEncryptor } from "./identity/key-encryption.js";
+import { PreparedMigrationTarget } from "./migration/target-keys.js";
+import { TransferInvitationReceiver } from "./migration/invitation-receiver.js";
+import { TransferAddressReservation } from "./migration/address-selection.js";
+import { TransferFinalRequestPublisher } from "./migration/final-request-publisher.js";
+import { MigrationFenceService } from "./migration/fence.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -99,6 +104,14 @@ const app = createApp(config, {
   ),
   deliveryStatusSigner: statusSigner,
   deliveryStatusReceiver: new DeliveryStatusReceiver(database.sql, onboardingRepository, resolver, config.hailServiceBase),
+  transferInvitationReceiver: new TransferInvitationReceiver(database.sql, resolver,
+    new PreparedMigrationTarget(database.sql, new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase)),
+  transferAddressReservation: new TransferAddressReservation(database.sql, resolver,
+    new PreparedMigrationTarget(database.sql, new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase)),
+  transferFinalRequestPublisher: new TransferFinalRequestPublisher(database.sql, resolver,
+    new PreparedMigrationTarget(database.sql, new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase),
+    transport.fetch, transport.validateTarget),
+  migrationFence: new MigrationFenceService(database.sql, resolver, config.hailServiceBase),
   async checkReadiness() {
     await Promise.all([database.ping(), plc.health()]);
     return { ready: true };

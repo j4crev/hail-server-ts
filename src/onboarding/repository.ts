@@ -255,6 +255,10 @@ export class OnboardingRepository
     `;
     if (inserted[0]) return accountFromRow(inserted[0]);
 
+    const transferReservation = await this.sql`
+      SELECT 1 FROM transfer_address_reservations WHERE canonical_address = ${canonicalAddress}`;
+    if (transferReservation.length) throw new Error("Address is held for a provider transfer");
+
     const existing = await this.sql<AccountRow[]>`
       SELECT id, tenant_id, canonical_address, did, onboarding_state,
              activation_attempt_id, activation_verification_mode

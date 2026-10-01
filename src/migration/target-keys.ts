@@ -5,6 +5,10 @@ import type { SQL } from "bun";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
 import { importEd25519PrivateKey } from "../identity/keys.js";
+import type { HailDidResolver } from "../plc/resolver.js";
+import { handshakeDigest, sameDigest, signHandshake, verifyHandshake,
+  type SignedHandshake, type TransferRequest, type TransferGrant, type TransferInvitation,
+  type TransferOffer, type TransferAddressSelection, type TransferReservation } from "./handshake.js";
 
 export interface PreparedTargetKeys {
   transferId: string;
@@ -69,6 +73,94 @@ export class PreparedMigrationTarget {
     `;
     return { transferId, did, destinationServiceBase: this.destinationServiceBase,
       rotationPublicKey, messagingPublicKey };
+  }
+
+  async validateInvitation(did: string, grantSigned: SignedHandshake,
+    invitationSigned: SignedHandshake, resolver: HailDidResolver):
+    Promise<{ grant: TransferGrant; invitation: TransferInvitation }> {
+    const state = await resolver.resolve(did);
+    const grant = await verifyHandshake(grantSigned, "hail.transfer-grant", state.identityDidKey);
+    const invitation = await verifyHandshake(invitationSigned, "hail.transfer-invitation", state.messagingDidKey);
+    const now = Math.floor(Date.now() / 1000);
+    if (state.did !== did || state.serviceBase !== grant.source_service_base ||
+      grant.did !== did || invitation.did !== grant.did || invitation.nonce !== grant.nonce ||
+      invitation.source_service_base !== grant.source_service_base ||
+      invitation.destination_service_base !== grant.destination_service_base ||
+      grant.destination_service_base !== this.destinationServiceBase ||
+      invitation.expires_at !== grant.expires_at || grant.expires_at <= now ||
+      !sameDigest(invitation.grant_digest, handshakeDigest(grantSigned.payloadBytes))) {
+      throw new Error("Destination invitation does not match the user grant");
+    }
+    return { grant, invitation };
+  }
+
+  async createOffer(prepared: PreparedTargetKeys, grantSigned: SignedHandshake,
+    invitationSigned: SignedHandshake, resolver: HailDidResolver): Promise<SignedHandshake> {
+    const { grant, invitation } = await this.validateInvitation(prepared.did, grantSigned, invitationSigned, resolver);
+    const now = Math.floor(Date.now() / 1000);
+    const offer: TransferOffer = { type: "hail.transfer-offer", version: 1,
+      did: prepared.did, nonce: grant.nonce, transfer_id: prepared.transferId,
+      source_service_base: grant.source_service_base,
+      destination_service_base: grant.destination_service_base,
+      grant_digest: handshakeDigest(grantSigned.payloadBytes),
+      invitation_digest: handshakeDigest(invitationSigned.payloadBytes),
+      invitation_challenge: invitation.challenge,
+      destination_rotation_key: prepared.rotationPublicKey,
+      destination_messaging_key: prepared.messagingPublicKey,
+      issued_at: now, expires_at: grant.expires_at };
+    return this.signWithPreparedMessaging(prepared, offer);
+  }
+
+  async finalRequest(prepared: PreparedTargetKeys, offerSigned: SignedHandshake,
+    selectionSigned: SignedHandshake, receiptSigned: SignedHandshake,
+    userIdentityKey: string): Promise<SignedHandshake> {
+    const offer = await verifyHandshake(offerSigned, "hail.transfer-offer", prepared.messagingPublicKey);
+    const selection = await verifyHandshake(selectionSigned, "hail.transfer-address-selection",
+      userIdentityKey);
+    const receipt = await verifyHandshake(receiptSigned, "hail.transfer-reservation", prepared.messagingPublicKey);
+    if (offer.did !== prepared.did || offer.transfer_id !== prepared.transferId ||
+      offer.destination_messaging_key !== prepared.messagingPublicKey ||
+      selection.did !== offer.did || selection.transfer_id !== offer.transfer_id ||
+      selection.nonce !== offer.nonce ||
+      !sameDigest(selection.grant_digest, offer.grant_digest) ||
+      receipt.did !== offer.did || receipt.transfer_id !== offer.transfer_id ||
+      receipt.nonce !== offer.nonce ||
+      receipt.address !== selection.address ||
+      !sameDigest(selection.offer_digest, handshakeDigest(offerSigned.payloadBytes)) ||
+      !sameDigest(receipt.offer_digest, handshakeDigest(offerSigned.payloadBytes)) ||
+      !sameDigest(receipt.selection_digest, handshakeDigest(selectionSigned.payloadBytes))) {
+      throw new Error("Final request does not match the address reservation");
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (selection.expires_at <= now || receipt.expires_at <= now || offer.expires_at <= now) {
+      throw new Error("Transfer address reservation has expired");
+    }
+    const request: TransferRequest = { ...offer, type: "hail.transfer-request", version: 1,
+      offer_digest: handshakeDigest(offerSigned.payloadBytes),
+      destination_address: selection.address,
+      selection_digest: handshakeDigest(selectionSigned.payloadBytes),
+      reservation_digest: handshakeDigest(receiptSigned.payloadBytes),
+      issued_at: now, expires_at: Math.min(now + 300, offer.expires_at) };
+    return this.signWithPreparedMessaging(prepared, request);
+  }
+
+  private async signWithPreparedMessaging(prepared: PreparedTargetKeys,
+    value: TransferOffer | TransferRequest | TransferReservation): Promise<SignedHandshake> {
+    await this.assertOwnership(prepared);
+    const rows = await this.sql<TargetKeyRow[]>`
+      SELECT messaging_public_key, messaging_private_ciphertext, messaging_nonce
+      FROM prepared_migration_target_keys WHERE transfer_id = ${prepared.transferId}`;
+    const row = rows[0];
+    if (!row || row.messaging_public_key !== prepared.messagingPublicKey) throw new Error("Target key missing");
+    const keyBytes = await this.encryptor.decrypt(prepared.transferId, "hail-messaging", "ed25519",
+      row.messaging_public_key, { ciphertext: row.messaging_private_ciphertext,
+        nonce: row.messaging_nonce, encryptionVersion: 1, kekId: "poc-v1" });
+    try { return await signHandshake(value, await importEd25519PrivateKey(keyBytes)); }
+    finally { keyBytes.fill(0); }
+  }
+
+  async signReservation(prepared: PreparedTargetKeys, value: TransferReservation): Promise<SignedHandshake> {
+    return this.signWithPreparedMessaging(prepared, value);
   }
 
   async assertOwnership(expected: PreparedTargetKeys): Promise<void> {
