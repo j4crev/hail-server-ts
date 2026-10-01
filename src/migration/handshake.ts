@@ -41,8 +41,18 @@ export interface TransferRequest extends Omit<TransferOffer, "type"> {
   type: "hail.transfer-request"; offer_digest: Uint8Array;
   destination_address: string; selection_digest: Uint8Array; reservation_digest: Uint8Array;
 }
+export interface TransferCancellation {
+  type: "hail.transfer-cancellation"; version: 1; did: string; nonce: string;
+  grant_digest: Uint8Array; issued_at: number; expires_at: number;
+}
+export interface TransferCancellationReceipt {
+  type: "hail.transfer-cancellation-receipt"; version: 1; did: string; nonce: string;
+  grant_digest: Uint8Array; invitation_digest: Uint8Array;
+  destination_domain: string; source_service_base: string;
+  issued_at: number; expires_at: number;
+}
 type Handshake = TransferGrant | TransferInvitation | TransferOffer | TransferAddressSelection |
-  TransferReservation | TransferRequest;
+  TransferReservation | TransferRequest | TransferCancellation | TransferCancellationReceipt;
 type Kind = Handshake["type"];
 
 export function serviceBaseForProviderDomain(domain: string): string {
@@ -77,28 +87,36 @@ function validate(value: unknown, kind: "hail.transfer-offer"): TransferOffer;
 function validate(value: unknown, kind: "hail.transfer-address-selection"): TransferAddressSelection;
 function validate(value: unknown, kind: "hail.transfer-reservation"): TransferReservation;
 function validate(value: unknown, kind: "hail.transfer-request"): TransferRequest;
+function validate(value: unknown, kind: "hail.transfer-cancellation"): TransferCancellation;
+function validate(value: unknown, kind: "hail.transfer-cancellation-receipt"): TransferCancellationReceipt;
 function validate(value: unknown, kind: Kind): Handshake {
   const common = ["type", "version", "did", "nonce", "source_service_base", "destination_service_base", "expires_at"];
   const extra = kind === "hail.transfer-grant" ? ["issued_at", "destination_domain"] :
     kind === "hail.transfer-invitation" ? ["grant_digest", "challenge"] :
+    kind === "hail.transfer-cancellation" ? ["grant_digest", "issued_at"] :
+    kind === "hail.transfer-cancellation-receipt" ?
+      ["grant_digest", "invitation_digest", "destination_domain", "source_service_base", "issued_at"] :
     kind === "hail.transfer-address-selection" ? ["transfer_id", "grant_digest", "offer_digest", "address", "selection_nonce", "issued_at"] :
     kind === "hail.transfer-reservation" ? ["transfer_id", "offer_digest", "selection_digest", "address", "issued_at"] :
       ["transfer_id", "grant_digest", "invitation_digest", "invitation_challenge",
         "destination_rotation_key", "destination_messaging_key", "issued_at",
         ...(kind === "hail.transfer-request" ? ["offer_digest", "destination_address", "selection_digest", "reservation_digest"] : [])];
-  const fieldsForKind = kind === "hail.transfer-address-selection" || kind === "hail.transfer-reservation"
+  const fieldsForKind = kind === "hail.transfer-address-selection" || kind === "hail.transfer-reservation" ||
+    kind === "hail.transfer-cancellation" || kind === "hail.transfer-cancellation-receipt"
     ? ["type", "version", "did", "nonce", "expires_at", ...extra]
     : [...common, ...extra];
   if (!fields(value, fieldsForKind) || value.type !== kind || value.version !== 1 ||
     typeof value.did !== "string" || !DID.test(value.did) ||
     typeof value.nonce !== "string" || !UUID.test(value.nonce) ||
     (kind !== "hail.transfer-reservation" && kind !== "hail.transfer-address-selection" &&
+      kind !== "hail.transfer-cancellation" && kind !== "hail.transfer-cancellation-receipt" &&
       (!validBase(value.source_service_base) || !validBase(value.destination_service_base) ||
        value.source_service_base === value.destination_service_base)) ||
     !Number.isSafeInteger(value.expires_at)) throw new Error("Invalid transfer handshake fields");
   if (kind !== "hail.transfer-invitation") {
     if (!Number.isSafeInteger(value.issued_at) || (value.expires_at as number) <= (value.issued_at as number) ||
-      (value.expires_at as number) - (value.issued_at as number) > MAX_AGE) {
+      (value.expires_at as number) - (value.issued_at as number) >
+        (kind === "hail.transfer-cancellation-receipt" ? 7 * 86400 : MAX_AGE)) {
       throw new Error("Transfer authorization must be short-lived");
     }
   }
@@ -133,6 +151,12 @@ function validate(value: unknown, kind: Kind): Handshake {
       typeof value.destination_address !== "string" ||
       canonicalizeHailAddress(value.destination_address) !== value.destination_address)) {
     throw new Error("Final transfer request lacks the user-selected address");
+  }
+  if (kind === "hail.transfer-cancellation-receipt" &&
+    (!digest(value.invitation_digest) || typeof value.destination_domain !== "string" ||
+      !validBase(value.source_service_base) ||
+      serviceBaseForProviderDomain(value.destination_domain) === value.source_service_base)) {
+    throw new Error("Invalid source cancellation receipt");
   }
   return value as unknown as Handshake;
 }
@@ -181,7 +205,7 @@ export class TransferInvitationService {
       challenge: new Uint8Array(randomBytes(32)), expires_at: grant.expires_at };
     const signed = await signHandshake(invitation, sourceMessagingPrivateKey);
     await verifyHandshake(signed, "hail.transfer-invitation", state.messagingDidKey);
-    await this.sql.begin(async (tx) => {
+    return this.sql.begin(async (tx) => {
       const account = await tx<{ id: string }[]>`
         SELECT id FROM provider_accounts WHERE did = ${grant.did} AND onboarding_state = 'active'
           AND activation_verification_mode = 'public' FOR UPDATE`;
@@ -202,12 +226,42 @@ export class TransferInvitationService {
           destination_service_base = EXCLUDED.destination_service_base,
           expires_at = EXCLUDED.expires_at, grant_bytes = EXCLUDED.grant_bytes,
           grant_signature = EXCLUDED.grant_signature, invitation_bytes = EXCLUDED.invitation_bytes,
-          invitation_signature = EXCLUDED.invitation_signature, created_at = clock_timestamp()
+          invitation_signature = EXCLUDED.invitation_signature, created_at = clock_timestamp(),
+          origin_request_bytes = NULL, origin_request_signature = NULL, origin_confirmed_at = NULL,
+          invitation_attempts = 0, next_invitation_attempt_at = clock_timestamp(),
+          invitation_lease_token = NULL, invitation_lease_expires_at = NULL,
+          cancelled_at = NULL, cancellation_bytes = NULL, cancellation_signature = NULL,
+          cancellation_receipt_bytes = NULL, cancellation_receipt_signature = NULL
         WHERE provider_transfer_authorizations.consumed_transfer_id IS NULL
-          AND provider_transfer_authorizations.expires_at <= clock_timestamp()
+          AND ((provider_transfer_authorizations.expires_at <= clock_timestamp()
+              AND provider_transfer_authorizations.origin_confirmed_at IS NULL)
+            OR provider_transfer_authorizations.cancelled_at IS NOT NULL)
+          AND (provider_transfer_authorizations.grant_bytes <> EXCLUDED.grant_bytes
+            OR provider_transfer_authorizations.grant_signature <> EXCLUDED.grant_signature)
         RETURNING did`;
-      if (!recorded[0]) throw new Error("A live or consumed transfer grant already exists for this DID");
+      if (!recorded[0]) {
+        const existing = await tx<{ grant_bytes: Uint8Array; grant_signature: Uint8Array;
+          invitation_bytes: Uint8Array; invitation_signature: Uint8Array;
+          expires_at: Date; cancelled_at: Date | null }[]>`
+          SELECT grant_bytes, grant_signature, invitation_bytes, invitation_signature,
+            expires_at, cancelled_at
+          FROM provider_transfer_authorizations WHERE did = ${grant.did} FOR UPDATE`;
+        const row = existing[0];
+        if (!row || row.cancelled_at || row.expires_at.getTime() <= Date.now() ||
+          !sameDigest(row.grant_bytes, grantSigned.payloadBytes) ||
+          !sameDigest(row.grant_signature, grantSigned.signature)) {
+          throw new Error("A different or unresolved transfer grant already exists for this DID");
+        }
+        const prior: SignedHandshake = { payloadBytes: new Uint8Array(row.invitation_bytes),
+          signature: new Uint8Array(row.invitation_signature) };
+        const parsed = await verifyHandshake(prior, "hail.transfer-invitation", state.messagingDidKey);
+        if (parsed.did !== grant.did || parsed.nonce !== grant.nonce ||
+          !sameDigest(parsed.grant_digest, handshakeDigest(grantSigned.payloadBytes))) {
+          throw new Error("Stored transfer invitation conflicts with user grant");
+        }
+        return prior;
+      }
+      return signed;
     });
-    return signed;
   }
 }

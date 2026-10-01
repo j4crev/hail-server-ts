@@ -23,6 +23,14 @@ import { TransferInvitationReceiver } from "./migration/invitation-receiver.js";
 import { TransferAddressReservation } from "./migration/address-selection.js";
 import { TransferFinalRequestPublisher } from "./migration/final-request-publisher.js";
 import { MigrationFenceService } from "./migration/fence.js";
+import { TransferInvitationDelivery } from "./migration/invitation-delivery.js";
+import { TransferDeliveryWorker } from "./migration/delivery-worker.js";
+import { TransferGrantSubmission } from "./migration/grant-submission.js";
+import { TransferInvitationService } from "./migration/handshake.js";
+import { TransferRateLimit } from "./migration/rate-limit.js";
+import { TransferCancellationService } from "./migration/cancellation.js";
+import { TransferCancellationReceiver } from "./migration/cancellation-receiver.js";
+import { TransferCleanup } from "./migration/cleanup.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -45,6 +53,15 @@ const statusSigner = new DeliveryStatusSigner(database.sql, onboardingRepository
   new KeyEncryptor(config.keyEncryptionKey), resolver, config.hailServiceBase);
 const statusPublisher = new TerminalStatusPublisher(database.sql, statusSigner, resolver,
   transport.fetch, transport.validateTarget);
+const targetKeys = new PreparedMigrationTarget(database.sql,
+  new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase);
+const finalTransferPublisher = new TransferFinalRequestPublisher(database.sql, resolver,
+  targetKeys, transport.fetch, transport.validateTarget);
+const invitationDelivery = new TransferInvitationDelivery(database.sql, resolver,
+  config.hailServiceBase, transport.fetch, transport.validateTarget);
+const transferWorker = new TransferDeliveryWorker(database.sql, invitationDelivery, finalTransferPublisher);
+const transferRateLimit = new TransferRateLimit(database.sql);
+const transferCleanup = new TransferCleanup(database.sql, transferRateLimit);
 
 await database.migrate();
 
@@ -65,6 +82,28 @@ setInterval(async () => {
   } finally {
     publicationRunning = false;
   }
+}, 5_000);
+
+let cleanupRunning = false;
+setInterval(async () => {
+  if (cleanupRunning) return;
+  cleanupRunning = true;
+  try { await transferCleanup.runOnce(); }
+  catch (error) {
+    console.error(JSON.stringify({ level: "error", message: "transfer cleanup failed",
+      error: error instanceof Error ? error.message : "unknown error" }));
+  } finally { cleanupRunning = false; }
+}, 60_000);
+
+let transferRunning = false;
+setInterval(async () => {
+  if (transferRunning) return;
+  transferRunning = true;
+  try { await transferWorker.runOnce(); }
+  catch (error) {
+    console.error(JSON.stringify({ level: "error", message: "transfer delivery worker failed",
+      error: error instanceof Error ? error.message : "unknown error" }));
+  } finally { transferRunning = false; }
 }, 5_000);
 
 let statusRunning = false;
@@ -105,13 +144,19 @@ const app = createApp(config, {
   deliveryStatusSigner: statusSigner,
   deliveryStatusReceiver: new DeliveryStatusReceiver(database.sql, onboardingRepository, resolver, config.hailServiceBase),
   transferInvitationReceiver: new TransferInvitationReceiver(database.sql, resolver,
-    new PreparedMigrationTarget(database.sql, new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase)),
+    targetKeys),
   transferAddressReservation: new TransferAddressReservation(database.sql, resolver,
-    new PreparedMigrationTarget(database.sql, new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase)),
-  transferFinalRequestPublisher: new TransferFinalRequestPublisher(database.sql, resolver,
-    new PreparedMigrationTarget(database.sql, new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase),
-    transport.fetch, transport.validateTarget),
+    targetKeys, transferRateLimit),
+  transferFinalRequestPublisher: finalTransferPublisher,
   migrationFence: new MigrationFenceService(database.sql, resolver, config.hailServiceBase),
+  transferGrantSubmission: new TransferGrantSubmission(database.sql, resolver, config.hailServiceBase,
+    onboardingRepository, new KeyEncryptor(config.keyEncryptionKey),
+    new TransferInvitationService(database.sql, resolver, config.hailServiceBase),
+    invitationDelivery, transferRateLimit),
+  transferRateLimit,
+  transferCancellation: new TransferCancellationService(database.sql, resolver, config.hailServiceBase,
+    onboardingRepository, new KeyEncryptor(config.keyEncryptionKey)),
+  transferCancellationReceiver: new TransferCancellationReceiver(database.sql, resolver, config.hailServiceBase),
   async checkReadiness() {
     await Promise.all([database.ping(), plc.health()]);
     return { ready: true };

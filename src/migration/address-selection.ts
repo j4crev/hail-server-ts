@@ -5,6 +5,7 @@ import type { HailDidResolver } from "../plc/resolver.js";
 import { handshakeDigest, sameDigest, verifyHandshake, type SignedHandshake,
   type TransferAddressSelection, type TransferOffer, type TransferReservation } from "./handshake.js";
 import { PreparedMigrationTarget, type PreparedTargetKeys } from "./target-keys.js";
+import type { TransferRateLimit } from "./rate-limit.js";
 
 interface InvitationRow {
   did: string; nonce: string; transfer_id: string;
@@ -20,9 +21,9 @@ interface ReservationRow {
 }
 
 export class TransferAddressReservation {
-  private readonly attempts = new Map<string, { startedAt: number; count: number }>();
   constructor(private readonly sql: SQL, private readonly resolver: HailDidResolver,
-    private readonly target: PreparedMigrationTarget) {}
+    private readonly target: PreparedMigrationTarget,
+    private readonly rateLimit?: TransferRateLimit) {}
 
   async reserve(signed: SignedHandshake): Promise<{ offer: SignedHandshake;
     selection: SignedHandshake; receipt: SignedHandshake; prepared: PreparedTargetKeys }> {
@@ -33,12 +34,8 @@ export class TransferAddressReservation {
     const selection = await verifyHandshake(signed, "hail.transfer-address-selection", resolved.identityDidKey);
     const now = Math.floor(Date.now() / 1000);
     if (selection.issued_at > now + 300 || selection.expires_at <= now) throw new Error("Address selection expired");
-    const window = this.attempts.get(selection.transfer_id);
-    if (window && now - window.startedAt < 900) {
-      if (window.count >= 12) throw new Error("Transfer address selection is rate limited");
-      window.count += 1;
-    } else {
-      this.attempts.set(selection.transfer_id, { startedAt: now, count: 1 });
+    if (this.rateLimit && !await this.rateLimit.admitAuthenticated("reservation", selection.did)) {
+      throw new Error("Transfer address selection is rate limited");
     }
     return this.sql.begin(async (tx) => {
       const invitations = await tx<InvitationRow[]>`

@@ -34,6 +34,8 @@ import { TransferInvitationReceiver } from "../src/migration/invitation-receiver
 import { TransferInvitationDelivery } from "../src/migration/invitation-delivery.js";
 import { TransferAddressReservation } from "../src/migration/address-selection.js";
 import { TransferFinalRequestPublisher } from "../src/migration/final-request-publisher.js";
+import { TransferGrantSubmission } from "../src/migration/grant-submission.js";
+import { TransferDeliveryWorker } from "../src/migration/delivery-worker.js";
 import { registerTransferRoutes } from "../src/migration/routes.js";
 import { invitationWire, TRANSFER_MEDIA_TYPE } from "../src/migration/wire.js";
 import { decodeDeterministic } from "@hailproto/codec";
@@ -337,12 +339,47 @@ integration("fenced transfer and concurrent cutover", () => {
     expect(await fenceService.get(did)).toBeNull();
   });
 
+  it("accepts the exact user grant over the source endpoint and returns the same Offer on retry", async () => {
+    const submit = new TransferGrantSubmission(source.sql, resolver, sourceBase,
+      new OnboardingRepository(source.sql), encryption,
+      new TransferInvitationService(source.sql, resolver, sourceBase), originDelivery);
+    const submissionRoutes = new Hono();
+    registerTransferRoutes(submissionRoutes, new TransferInvitationReceiver(source.sql, resolver,
+      new PreparedMigrationTarget(source.sql, encryption, sourceBase)), undefined, undefined,
+    undefined, submit);
+    const { requestWire, parseRequestWire } = await import("../src/migration/wire.js");
+    const send = () => submissionRoutes.request("https://source.example.com/hail/transfers/grants",
+      { method: "POST", headers: { "Content-Type": TRANSFER_MEDIA_TYPE },
+        body: Uint8Array.from(requestWire(userGrant)) });
+    const first = await send();
+    expect(first.status).toBe(200);
+    expect(parseRequestWire(new Uint8Array(await first.arrayBuffer()))).toEqual(signedOffer);
+    const second = await send();
+    expect(second.status).toBe(200);
+    expect(parseRequestWire(new Uint8Array(await second.arrayBuffer()))).toEqual(signedOffer);
+    const rows = await source.sql`SELECT nonce FROM provider_transfer_authorizations WHERE did = ${did}`;
+    expect(rows).toHaveLength(1);
+  });
+
   it("requires the signed request to be observed at the authorized HTTPS origin", async () => {
     await source.sql`UPDATE provider_transfer_authorizations
       SET origin_request_bytes = NULL, origin_request_signature = NULL, origin_confirmed_at = NULL
       WHERE did = ${did}`;
     try {
       await expect(fenceService.begin(signedOffer, signedOffer, signedOffer)).rejects.toThrow("authenticated destination-origin");
+      const pendingSubmission = new TransferGrantSubmission(source.sql, resolver, sourceBase,
+        new OnboardingRepository(source.sql), encryption,
+        new TransferInvitationService(source.sql, resolver, sourceBase),
+        { async deliver() { throw new Error("Destination connection unavailable"); } });
+      const pendingRoutes = new Hono();
+      registerTransferRoutes(pendingRoutes, new TransferInvitationReceiver(source.sql, resolver,
+        new PreparedMigrationTarget(source.sql, encryption, sourceBase)), undefined, undefined,
+      undefined, pendingSubmission);
+      const { requestWire } = await import("../src/migration/wire.js");
+      const pendingResponse = await pendingRoutes.request("https://source.example.com/hail/transfers/grants",
+        { method: "POST", headers: { "Content-Type": TRANSFER_MEDIA_TYPE },
+          body: Uint8Array.from(requestWire(userGrant)) });
+      expect(pendingResponse.status).toBe(202);
       const badRedirect = new TransferInvitationDelivery(source.sql, resolver, sourceBase,
         async () => new Response(null, { status: 307, headers: { Location: "https://other.example.com" } }),
         (url) => { expect(url.href).toBe("https://target.example.com/.well-known/hail/transfers/invitations"); });
@@ -359,10 +396,23 @@ integration("fenced transfer and concurrent cutover", () => {
           throw new Error("Connection lost after destination preparation");
         }, (url) => { expect(url.href).toBe("https://target.example.com/.well-known/hail/transfers/invitations"); });
       await expect(ambiguous.deliver(did)).rejects.toThrow("Connection lost");
+      const failedWorker = new TransferDeliveryWorker(source.sql,
+        { async deliver() { throw new Error("Destination temporarily unavailable"); } },
+        { async publish() {} });
+      expect(await failedWorker.runOnce()).toBe("invitation");
+      const attempts = await source.sql<{ invitation_attempts: number; invitation_lease_token: string | null }[]>`
+        SELECT invitation_attempts, invitation_lease_token FROM provider_transfer_authorizations WHERE did = ${did}`;
+      expect(attempts[0]?.invitation_attempts).toBe(1);
+      expect(attempts[0]?.invitation_lease_token).toBeNull();
+      await source.sql`UPDATE provider_transfer_authorizations SET next_invitation_attempt_at = clock_timestamp()
+        WHERE did = ${did}`;
+      const restartedWorker = new TransferDeliveryWorker(source.sql, originDelivery,
+        { async publish() {} });
+      expect(await restartedWorker.runOnce()).toBe("invitation");
       const rows = await source.sql<{ origin_confirmed_at: Date | null }[]>`
         SELECT origin_confirmed_at FROM provider_transfer_authorizations WHERE did = ${did}`;
       expect(rows).toHaveLength(1);
-      expect(rows[0]?.origin_confirmed_at).toBeNull();
+      expect(rows[0]?.origin_confirmed_at).toBeInstanceOf(Date);
     } finally {
       expect(await originDelivery.deliver(did)).toEqual(signedOffer);
       expect(await target.sql`SELECT transfer_id FROM prepared_migration_target_keys WHERE did = ${did}`)

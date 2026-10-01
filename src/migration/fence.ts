@@ -90,14 +90,14 @@ export class MigrationFenceService {
         invitation_signature: Uint8Array; consumed_transfer_id: string | null;
         origin_request_bytes: Uint8Array | null; origin_request_signature: Uint8Array | null;
         origin_confirmed_at: Date | null; final_request_bytes: Uint8Array | null;
-        final_request_signature: Uint8Array | null }[]>`
+        final_request_signature: Uint8Array | null; cancelled_at: Date | null }[]>`
         SELECT nonce, destination_service_base, expires_at, grant_bytes, grant_signature,
           invitation_bytes, invitation_signature, consumed_transfer_id,
           origin_request_bytes, origin_request_signature, origin_confirmed_at,
-          final_request_bytes, final_request_signature
+          final_request_bytes, final_request_signature, cancelled_at
         FROM provider_transfer_authorizations WHERE did = ${did} FOR UPDATE`;
       const stored = rows[0];
-      if (!stored || stored.expires_at.getTime() <= this.now().getTime()) {
+      if (!stored || stored.cancelled_at || stored.expires_at.getTime() <= this.now().getTime()) {
         throw new Error("No valid user-authorized invitation for this DID");
       }
       const grant = await verifyHandshake({ payloadBytes: stored.grant_bytes, signature: stored.grant_signature },

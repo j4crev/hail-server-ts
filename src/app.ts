@@ -19,6 +19,10 @@ import type { TransferInvitationReceiver } from "./migration/invitation-receiver
 import type { TransferAddressReservation } from "./migration/address-selection.js";
 import type { TransferFinalRequestPublisher } from "./migration/final-request-publisher.js";
 import type { MigrationFenceService } from "./migration/fence.js";
+import type { TransferGrantSubmission } from "./migration/grant-submission.js";
+import type { TransferRateLimit } from "./migration/rate-limit.js";
+import type { TransferCancellationService } from "./migration/cancellation.js";
+import type { TransferCancellationReceiver } from "./migration/cancellation-receiver.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -37,6 +41,10 @@ export interface AppDependencies {
   transferAddressReservation?: TransferAddressReservation;
   transferFinalRequestPublisher?: TransferFinalRequestPublisher;
   migrationFence?: MigrationFenceService;
+  transferGrantSubmission?: TransferGrantSubmission;
+  transferRateLimit?: TransferRateLimit;
+  transferCancellation?: TransferCancellationService;
+  transferCancellationReceiver?: TransferCancellationReceiver;
 }
 
 const defaultDependencies: AppDependencies = {
@@ -67,7 +75,9 @@ export function createApp(
   if (dependencies.deliveryStatusReceiver) registerDeliveryStatusRoutes(app, dependencies.deliveryStatusReceiver,
     protectedSchedule);
   if (dependencies.transferInvitationReceiver) registerTransferRoutes(app, dependencies.transferInvitationReceiver,
-    dependencies.transferAddressReservation, dependencies.migrationFence, dependencies.transferFinalRequestPublisher);
+    dependencies.transferAddressReservation, dependencies.migrationFence, dependencies.transferFinalRequestPublisher,
+    dependencies.transferGrantSubmission, dependencies.transferRateLimit,
+    dependencies.transferCancellation, dependencies.transferCancellationReceiver);
 
   app.get("/health/live", (context) =>
     context.json({

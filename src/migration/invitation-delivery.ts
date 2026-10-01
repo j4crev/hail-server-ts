@@ -16,6 +16,7 @@ interface SourceRow {
   consumed_transfer_id: string | null;
   origin_request_bytes: Uint8Array | null;
   origin_request_signature: Uint8Array | null;
+  cancelled_at: Date | null;
 }
 
 export class TransferInvitationDelivery {
@@ -32,10 +33,12 @@ export class TransferInvitationDelivery {
     const rows = await this.sql<SourceRow[]>`
       SELECT destination_service_base, expires_at, grant_bytes, grant_signature,
         invitation_bytes, invitation_signature, consumed_transfer_id,
-        origin_request_bytes, origin_request_signature
+        origin_request_bytes, origin_request_signature, cancelled_at
       FROM provider_transfer_authorizations WHERE did = ${did}`;
     const row = rows[0];
-    if (!row || row.expires_at.getTime() <= Date.now()) throw new Error("Transfer grant expired or absent");
+    if (!row || row.cancelled_at || row.expires_at.getTime() <= Date.now()) {
+      throw new Error("Transfer grant expired, cancelled or absent");
+    }
     const grantSigned = { payloadBytes: row.grant_bytes, signature: row.grant_signature };
     const invitationSigned = { payloadBytes: row.invitation_bytes, signature: row.invitation_signature };
     const grant = await verifyHandshake(grantSigned, "hail.transfer-grant", state.identityDidKey);
@@ -51,7 +54,8 @@ export class TransferInvitationDelivery {
       throw new Error("Stored invitation does not match the current user grant");
     }
     if (row.origin_request_bytes && row.origin_request_signature) {
-      const previous = { payloadBytes: row.origin_request_bytes, signature: row.origin_request_signature };
+      const previous = { payloadBytes: new Uint8Array(row.origin_request_bytes),
+        signature: new Uint8Array(row.origin_request_signature) };
       const decoded: unknown = decodeDeterministic(previous.payloadBytes);
       if (!decoded || typeof decoded !== "object" || !("expires_at" in decoded) ||
         typeof decoded.expires_at !== "number") throw new Error("Stored origin response is invalid");
@@ -90,10 +94,10 @@ export class TransferInvitationDelivery {
         const current = await tx<SourceRow[]>`
           SELECT destination_service_base, expires_at, grant_bytes, grant_signature,
             invitation_bytes, invitation_signature, consumed_transfer_id,
-            origin_request_bytes, origin_request_signature
+            origin_request_bytes, origin_request_signature, cancelled_at
           FROM provider_transfer_authorizations WHERE did = ${did} FOR UPDATE`;
         const stored = current[0];
-        if (!stored || stored.expires_at.getTime() <= Date.now() ||
+        if (!stored || stored.cancelled_at || stored.expires_at.getTime() <= Date.now() ||
           stored.destination_service_base !== grant.destination_service_base ||
           !sameDigest(stored.grant_bytes, grantSigned.payloadBytes) ||
           !sameDigest(stored.grant_signature, grantSigned.signature) ||

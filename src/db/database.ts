@@ -138,6 +138,21 @@ const migrations: readonly Migration[] = [
     name: "transfer-grant-evidence",
     url: new URL("../../migrations/0025_transfer_grant_evidence.sql", import.meta.url),
   },
+  {
+    version: 26,
+    name: "transfer-delivery-jobs",
+    url: new URL("../../migrations/0026_transfer_delivery_jobs.sql", import.meta.url),
+  },
+  {
+    version: 27,
+    name: "transfer-throttling",
+    url: new URL("../../migrations/0027_transfer_throttling.sql", import.meta.url),
+  },
+  {
+    version: 28,
+    name: "transfer-cancellation",
+    url: new URL("../../migrations/0028_transfer_cancellation.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

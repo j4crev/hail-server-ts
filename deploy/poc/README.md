@@ -591,7 +591,7 @@ were healthy with zero unexpected restarts and no application errors.
 ### Portable-Custody Development Boundary
 
 Provider source after the deployed hardening runtime includes **local-only**
-migrations 13–25, the fenced transfer handshake rehearsal and user-owned key/monitor
+migrations 13–28, the fenced transfer handshake rehearsal and user-owned key/monitor
 interfaces. The VPS still runs provider runtime `021dced` with migration 12 on
 both databases. Do **not** rebuild or restart public providers from the newer
 source expecting a portable production migration: startup automatically

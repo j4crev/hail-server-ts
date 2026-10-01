@@ -53,7 +53,8 @@ export class TransferFinalRequestPublisher {
       } else {
         request = await this.target.finalRequest(prepared, offer, selection, receipt, state.identityDidKey);
         await tx`UPDATE received_transfer_invitations SET final_request_bytes = ${request.payloadBytes},
-          final_request_signature = ${request.signature}, final_submitted_at = clock_timestamp()
+          final_request_signature = ${request.signature}, final_submitted_at = clock_timestamp(),
+          next_final_attempt_at = clock_timestamp() + interval '30 seconds'
           WHERE transfer_id = ${transferId} AND final_request_bytes IS NULL`;
       }
       await tx`UPDATE transfer_address_reservations SET state = 'submitted'
@@ -80,6 +81,10 @@ export class TransferFinalRequestPublisher {
         await response.body?.cancel().catch(() => {});
         throw new Error("Old provider did not durably acknowledge the final transfer request");
       }
+      await this.sql`UPDATE received_transfer_invitations
+        SET final_acknowledged_at = COALESCE(final_acknowledged_at, clock_timestamp()),
+          next_final_attempt_at = NULL
+        WHERE transfer_id = ${transferId} AND final_request_bytes = ${records.request.payloadBytes}`;
     } finally { clearTimeout(timer); controller.abort(); }
   }
 }

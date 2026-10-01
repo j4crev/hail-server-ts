@@ -52,6 +52,19 @@ export function parseFinalRequestWire(bytes: Uint8Array): { selection: SignedHan
   return { selection: decodeSignedRecord(row.selection),
     reservation: decodeSignedRecord(row.reservation), request: decodeSignedRecord(row.request) };
 }
+export function cancellationWire(cancellation: SignedHandshake, receipt: SignedHandshake): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({ cancellation: encodeSignedRecord(cancellation),
+    receipt: encodeSignedRecord(receipt) }));
+}
+export function parseCancellationWire(bytes: Uint8Array): { cancellation: SignedHandshake;
+  receipt: SignedHandshake } {
+  const row: unknown = parseWire(bytes);
+  if (!row || typeof row !== "object" || Array.isArray(row) || Object.keys(row).length !== 2 ||
+    !("cancellation" in row) || !("receipt" in row)) {
+    throw new Error("Invalid transfer cancellation envelope");
+  }
+  return { cancellation: decodeSignedRecord(row.cancellation), receipt: decodeSignedRecord(row.receipt) };
+}
 function parseWire(bytes: Uint8Array): unknown {
   if (!bytes.length || bytes.length > MAX_TRANSFER_WIRE_BYTES) throw new Error("Transfer wire payload exceeds limit");
   return parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8", { fatal: true }).decode(bytes));

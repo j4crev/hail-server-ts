@@ -201,7 +201,7 @@ continuity-preserving provider migration work remain outstanding.
 
 ## Portable Provider Cutover (Disposable Rehearsal)
 
-Migrations 13–25 add DID-scoped source write fences, authenticated immutable
+Migrations 13–28 add DID-scoped source write fences, authenticated immutable
 snapshots, destination-owned prepared operational keys, a signed user-consent
 and PLC operation check, and an inactive destination import. The activation
 service verifies two independently witnessed current PLC reads and monitor
@@ -226,6 +226,16 @@ reservation and consumes the user grant
 atomically with the fence. Neither source messaging nor provider PLC keys can
 issue the user grant or sign the final top-recovery-key PLC operation.
 
+The user client can POST its signed grant to the current source's fixed
+`/hail/transfers/grants` endpoint. A `200` returns the origin-verified Offer;
+`202` means invitation delivery remains pending and retrying the **same**
+signed grant retrieves it once available. PostgreSQL-leased source/target
+workers retry pending invitations and final requests after restarts. Rate
+buckets are shared by provider processes. Before fencing, the user can sign
+an exact transfer cancellation: the old provider signs a no-fence receipt,
+and only that receipt allows the target to release an ambiguous submitted
+reservation. Expiry cleanup releases only transfers with no final push.
+
 These commands are operator building blocks, **not a public migration
 procedure**: `transfer:grant` in `../hail-user-client-ts` produces a private
 signed domain grant; `migration:invite -- <grant-file> <invitation-file> <offer-file>`
@@ -245,8 +255,9 @@ run
 `migration:stage` with separate user-signed consent, exact signed PLC update,
 and fresh user-signed Address Binding. Export and consent files must be private
 (`0600`) and transferred over an authenticated administrative channel.
-User-facing grant submission, automatic outbox retries, public
-PLC submission and activation CLIs are **not implemented**; an independent
+The reference client additionally has `transfer:submit-grant` and
+`transfer:cancel` commands. Production account UX, automatic submission
+of the final user-signed PLC operation and activation CLIs remain open; an independent
 monitor, mirror/checkpoint, vault recovery and destination-domain publication still
 require production infrastructure. Do not deploy this rehearsal as a public
 transfer service.
