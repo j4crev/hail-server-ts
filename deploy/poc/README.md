@@ -588,26 +588,31 @@ returned their signed `delivered` revision-2 snapshots; each message still
 had exactly one delivered row and one body-retrieval attempt. Both providers
 were healthy with zero unexpected restarts and no application errors.
 
+Eight external HTTPS samples per protected generic path showed medians of
+782 ms for both malformed envelope submission and unknown status push;
+95th-percentile samples were 857 and 859 ms including network variance.
+The provisional 750 ms server floor still needs sustained-load calibration.
+
 ### Portable-Custody Development Boundary
 
-Provider source after the deployed hardening runtime includes **local-only**
-migrations 13–30, the fenced transfer handshake rehearsal and user-owned key/monitor
-interfaces. The VPS still runs provider runtime `021dced` with migration 12 on
-both databases. Do **not** rebuild or restart public providers from the newer
-source expecting a portable production migration: startup automatically
-applies pending migrations, while the live Alice and Bob DIDs are custodial
-and exist only in a private PLC registry. A provider-held user identity key
-fails the new portable-custody precondition by design.
+The runtime can now rehearse portable transfer **only** for new DIDs created
+with user-held keys in this POC's private PLC directory. The original Alice
+and Bob DIDs remain custodial and cannot be passed off as portable: their
+provider-held `#hail-identity` key fails that precondition. The `private-poc`
+mode pins `http://plc:2582`, permits only the two POC Hail service bases,
+checks one validated private PLC history, and records `poc-local` monitoring
+evidence. It does not use `plc.directory` or establish independent mirrors,
+monitoring, or production portable-custody guarantees.
 
 The new separate public reference projects are
 <https://github.com/j4crev/hail-user-client-ts> (local user keys and encrypted
 backup) and <https://github.com/j4crev/hail-plc-monitor-ts> (user-run PLC
 monitor). No independently hosted monitor, verified public PLC export
-checkpoint, real user-domain transfer or public `plc.directory` portable DID
-has yet been deployed. The full trust and rollout boundary is recorded in
+checkpoint, or public `plc.directory` portable DID has been deployed. The
+new provider-to-provider transfer below remains private-PLC POC evidence;
+the full trust and rollout boundary is recorded in
 `/opt/hail-poc/hailproto/docs/production-portable-custody.md` when that guide
-is installed. The older deployed runtime remains the supported live POC until
-a separate, backed-up private-PLC release is deliberately rolled out.
+is installed. Separate user-controlled monitor hosting remains deferred.
 
 The private-PLC POC profile can rehearse **new** user-key-held identities on
 this internal registry, using one canonical validated reader explicitly
@@ -619,10 +624,56 @@ isolated `hail_private_stage` copies. Migrations 13–30 applied successfully
 to both copies. Two read-only schema-rehearsal provider containers returned
 `200` readiness and served Alice's/Bob's cloned WebFinger records with HTTP
 `200`; the **live** databases and runtime remained at migration 12 and
-`021dced` after this rehearsal. The staging containers expose no public
-ports and run no background workers. Take a fresh backup and preserve the
-old image before any later live POC update.
-Eight external HTTPS samples per protected generic path showed medians of
-782 ms for both malformed envelope submission and unknown status push;
-95th-percentile samples were 857 and 859 ms including network variance.
-The provisional 750 ms server floor still needs sustained-load calibration.
+`021dced` after that first rehearsal. The temporary staging containers had
+no public ports or background workers and were removed after verification.
+
+### 2026-10-01: Private-PLC POC Runtime Rollout
+
+Verified new custom-format backups at
+`/var/backups/hail-poc/pre-private-poc-roll-20261001T220212Z` before updating
+either live provider. The pre-rollout image was tagged
+`hail-server-ts:pre-private-poc-20261001T220026Z` (image
+`sha256:76e04125b365a2b59dac2a36d8dba81629005deb9f58335694a5625922b8cb0a`).
+Both providers were rolled one at a time to source `3495ff5`, image
+`sha256:3989adda60af3901c6e69959e56663733cacff28c576f218826bb74e3e6ab7b3`.
+Their databases applied migrations 13–30; Alice's and Bob's original
+WebFinger records and both public readiness endpoints still returned `200`.
+No existing DID was reclassified as portable. The private PLC service and
+its schema were not changed by the runtime rollout.
+
+### 2026-10-05: First New-DID Provider Transfer
+
+Before creating a new POC identity, backed up the app, dev, and private PLC
+databases in custom format at
+`/var/backups/hail-poc/pre-portable-did-20261005T203828Z`; all three dumps
+passed PostgreSQL restore-list checks. A disposable encrypted user vault and
+separate recovery material remain **only on the user machine**, outside all
+provider checkouts. The local vault copy was restored and both keys verified;
+this is not independent-device production backup evidence.
+
+The user-held keys signed a new genesis on the private PLC for
+`did:plc:eafyy6xd2mv4aj5kvtkhecnf`, initially at
+`poc-move-20261005@hailproto.app`. The app provider stored only its own PLC
+rotation/messaging keys and activated the address using public HTTPS
+WebFinger/Binding verification. It published Sender Profile revision 1.
+The signed user grant named `hailproto.dev`; the destination reserved
+`poc-move-20261005@hailproto.dev` and pushed the final request. The app source
+fenced and exported the signed state, after which the local user client
+signed the exact private-PLC cutover, snapshot consent, and target binding.
+The private PLC accepted the operation, and its two-operation log resolved
+the new dev service/key. The dev provider staged and published the binding,
+activated the import under a `private-poc` assessment, and signed the
+activation receipt. The app source verified the receipt and retired its
+permanent fence. Dev now serves Sender Profile revision 2 with its *own*
+messaging key. Both providers stayed healthy without unexpected restarts.
+
+The source initially still served WebFinger for the old demo address after
+retirement. Provider fix `9448310` prevents retired DIDs from appearing in
+address discovery without mutating their historical signed binding. The
+fix was rolled one provider at a time to both containers (image
+`sha256:e87d954d9af5a65dc149eeb551a68854d54ba0288c4bd9107dfd18210eef3ef9`);
+`hail-server-ts:pre-retired-webfinger-20261005` retains the previous
+migration-30 image. Afterwards the old demo address returned `404`, while
+the new dev address, its Sender Profile and both older custodial addresses
+returned `200`. Both live databases remain at migration 30, and both
+containers are healthy with zero restarts.
