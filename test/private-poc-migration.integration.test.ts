@@ -219,6 +219,8 @@ integration("private PLC transfer between disposable POC providers", () => {
     const receipt = await activation.issueReceipt(offer.transfer_id);
     await sourceFence.retire(genesis.did, offer.transfer_id, receipt);
     expect((await sourceFence.get(genesis.did))?.state).toBe("retired");
+    expect(await sourceRepo.findPublishedByAddress(sourceAddress)).toBeNull();
+    expect(await targetRepo.findPublishedByAddress(destinationAddress)).not.toBeNull();
     expect((await targetRepo.getAccountByDid(genesis.did))?.state).toBe("active");
     expect(log).toHaveLength(2);
     expect(published).toMatch(/^[0-9a-f-]{36}$/);

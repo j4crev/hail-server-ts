@@ -622,6 +622,8 @@ export class OnboardingRepository
       WHERE canonical_address = ${address}
         AND selected_at IS NOT NULL
         AND expires_at > now()
+        AND NOT EXISTS (SELECT 1 FROM provider_migration_fences fence
+          WHERE fence.did = address_bindings.did AND fence.state = 'retired')
       ORDER BY selected_at DESC
       LIMIT 1
     `;
