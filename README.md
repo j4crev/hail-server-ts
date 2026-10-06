@@ -7,6 +7,22 @@ security limitations, and deployment procedure are documented in the sibling
 Hail Protocol checkout at
 [`../hailproto/docs/typescript-backend-poc.md`](../hailproto/docs/typescript-backend-poc.md).
 
+## Current POC and guides
+
+The deployed private-PLC POC supports Grant-authorized detached-body delivery,
+signed terminal status, revocation, single-use replies and user-authorized
+provider transfer with pending-message continuity. Provider databases are at
+migration 31. A separate same-VPS monitor proves signed-alert functionality,
+but is not independent production monitoring.
+
+- [Provider deployment and delivery runbook](deploy/poc/README.md).
+- [User-device vault/signing client](https://github.com/j4crev/hail-user-client-ts#readme).
+- [Transfer/recovery checkpoints](https://github.com/j4crev/hailproto/blob/main/docs/production-portable-custody.md#resuming-a-private-plc-poc-ceremony).
+- [Same-VPS monitor deployment](https://github.com/j4crev/hail-plc-monitor-ts/blob/main/deploy/poc/README.md).
+
+Original Alice/Bob identities are custodial; only fresh user-key-held POC DIDs
+use the portable ceremony. Public HTTPS activation is not public PLC registration.
+
 ## Development
 
 Build the sibling codec first, install dependencies, and create local
@@ -111,7 +127,7 @@ Local revocation commits before publication and immediately remains
 authoritative even if the remote notification needs retries. A revoked Grant ID
 cannot become active again.
 
-## Single-Use Replies (Local POC)
+## Single-Use Replies (Private-PLC POC)
 
 Reply authorization follows
 [`../hailproto/spec/envelopes.md`](../hailproto/spec/envelopes.md#reply-authorization):
@@ -197,11 +213,12 @@ selection. It does not simulate the fenced provider-state transfer required
 for a real service migration. The first bounded-processing and PLC-read slice
 is deployed to both public POC providers; tested runtime and backup details
 are in `deploy/poc/README.md`. Further sustained-load calibration and
-continuity-preserving provider migration work remain outstanding.
+broader migration failure/recovery coverage remain outstanding. One live
+private-PLC transfer has delivered a previously accepted message exactly once.
 
 ## Portable Provider Cutover (Disposable Rehearsal)
 
-Migrations 13–30 add DID-scoped source write fences, authenticated immutable
+Migrations 13–31 add DID-scoped source write fences, authenticated immutable
 snapshots, destination-owned prepared operational keys, a signed user-consent
 and PLC operation check, and an inactive destination import. The activation
 service verifies two independently witnessed current PLC reads and monitor
@@ -261,8 +278,9 @@ of the final user-signed PLC operation and activation CLIs remain open; an indep
 monitor, mirror/checkpoint, vault recovery and destination-domain publication still
 require production infrastructure. Do not deploy this rehearsal as a public
 transfer service.
-The current public POC accounts were created with custodial keys in a private
-directory and **must not be used as portable migration sources**. Separate
+The original Alice/Bob POC accounts were created with custodial keys in a private
+directory and **must not be used as portable migration sources**. New user-held
+private-PLC DIDs have completed the separate POC ceremony below. Separate
 reference projects now exist at `../hail-user-client-ts` for user-controlled
 key generation, encrypted vault recovery and offline signing, and
 `../hail-plc-monitor-ts` for user-run independent PLC monitoring and signed
@@ -322,7 +340,7 @@ source: poc:retire-source -- <did> <transfer-id> <receipt-file>
 The client signs the exact PLC cutover, consent and Address Binding; the
 source verifies the target's activation receipt before retiring. Signed files must
 be private mode `0600`, transferred over an authenticated administrative
-channel, and kept apart from the provider-held user vault/recovery secret.
+channel. The user-held vault/recovery secret never goes to either provider.
 No signed cutover is submitted automatically by starting the web server.
 
 To rehearse message continuity with a user-held identity, the source POC
@@ -340,3 +358,12 @@ the exact Address Binding, Sender Profile, chosen scope and consent hashes
 before queuing publication. Import of unchanged signed bytes is idempotent.
 An accepted message with a pending delivery obligation can then be used to
 test more than empty-account transfer.
+
+Migration 31 preserves both local Grant roles when a transfer places grantor
+and grantee on the same provider, retaining one exact immutable revision
+chain. Activation, signed receipt writes and retirement support exact
+completion retries after a lost response. Resume the existing staged transfer
+after a fault; never release an exported fence or re-sign a submitted PLC
+operation merely to get past a failure. Returning to a former provider with a
+retained retired account and coordinated post-export rollback remain separate
+work. See the linked recovery guide and deployment log for the verified proof.

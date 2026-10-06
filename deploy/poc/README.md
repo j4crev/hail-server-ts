@@ -4,13 +4,41 @@ This deployment runs both Hail providers, a private PLC directory, three
 PostgreSQL databases, and Caddy on one VPS. Only Caddy ports 80 and 443 are
 published.
 
+## Start here: current deployment
+
+As of October 6, 2026, both provider databases are at migration **31**. The
+POC supports message/reply delivery and fresh user-key-held private-PLC DID
+transfers, including pending-message continuity. Original Alice/Bob accounts
+remain custodial and cannot be used as portable migration sources.
+
+For a fresh install, follow **VPS Baseline → Secrets → Cloudflare DNS → Start
+→ Create Test Identities**, recording the new DIDs printed by your own
+onboarding commands. Then use the message/reply walkthroughs below. The dated
+rollout records describe earlier releases and existing demo identifiers;
+they are not instructions to downgrade or replay the live demonstration.
+
+The [user client README](https://github.com/j4crev/hail-user-client-ts#readme)
+and the provider README's [private-PLC ceremony](../../README.md#private-plc-poc-ceremony-new-dids-only)
+cover fresh user-key-held onboarding and transfer. Run user signing commands
+on the user device; never copy its vault/recovery secret into a provider.
+For interrupted transfers, use the [recovery checkpoints](https://github.com/j4crev/hailproto/blob/main/docs/production-portable-custody.md#resuming-a-private-plc-poc-ceremony).
+
+The monitor is a **separate Compose stack**. Start the provider stack first
+to create its private/edge networks, then follow the
+[same-VPS monitor runbook](https://github.com/j4crev/hail-plc-monitor-ts/blob/main/deploy/poc/README.md).
+It adds its own PostgreSQL database/key and signed-alert receipt storage.
+`/poc/monitor-alerts` becomes usable once its receiver is running; starting
+the provider stack alone does not start that service. It is non-independent
+and does not enable the production monitor gate.
+
 The sibling checkout layout must be preserved:
 
 ```text
 <deployment-root>/
 |-- hailproto/
 |-- hail-server-ts/
-`-- did-method-plc/
+|-- did-method-plc/
+`-- hail-plc-monitor-ts/   # add for the separate same-VPS monitor stack
 ```
 
 ## VPS Baseline
@@ -182,6 +210,11 @@ docker compose --env-file .env -f compose.yaml exec hail-dev \
 
 Each command must reach `address-staged`. Then perform real public activation:
 
+Record the DIDs printed by onboarding as `alice_did` and `bob_did` on the
+operator shell. Every subsequent message/profile command uses those values;
+a new installation will not have the live demo's recorded DIDs. These setup
+commands create custodial test identities, not user-key-held portable ones.
+
 ```bash
 docker compose --env-file .env -f compose.yaml exec hail-app \
   bun run activate:public -- alice@hailproto.app
@@ -200,7 +233,7 @@ Publish Alice's signed Sender Profile and verify it from the other provider:
 docker compose --env-file .env -f compose.yaml exec hail-app \
   bun run profile:create -- alice@hailproto.app examples/alice-profile.json
 docker compose --env-file .env -f compose.yaml exec hail-dev \
-  bun run profile:verify -- did:plc:rewawq7tylmrzaaprd27sdhb
+  bun run profile:verify -- "$alice_did"
 ```
 
 Profile creation is idempotent for unchanged authoring content and the current
@@ -255,7 +288,8 @@ returns the existing tombstone without creating another revision.
 ## Detached-Body And Delivery Rollout
 
 The envelope and status slice adds forward-only provider migrations 8 through
-11. Back up **both** provider databases before replacing either provider. From
+11 in the original release; the current checkout applies all migrations
+through **31**. Back up **both** provider databases before replacing either provider. From
 `/opt/hail-poc/hail-server-ts/deploy/poc` on the VPS, as the administrator:
 
 ```bash
@@ -274,13 +308,18 @@ docker compose --env-file .env -f compose.yaml exec -T dev-db \
 
 Confirm both nonempty dumps and a clean `pg_restore --list` result before the
 rollout. The provider startup migrates under a PostgreSQL advisory lock. Build
-the single shared provider image, replace both instances, and verify both
-report healthy. Do not edit migrations that have already been applied.
+the single shared provider image, replace one instance at a time, and verify
+readiness before replacing the next. Do not edit applied migrations. For a
+deployment with portable identities, also retain a coherent PLC backup; the
+separate monitor runbook covers its own data/key/receipt backups.
 
 ```bash
 docker compose --env-file .env -f compose.yaml config --quiet
 docker compose --env-file .env -f compose.yaml build hail-app
-docker compose --env-file .env -f compose.yaml up -d --no-deps hail-app hail-dev
+docker compose --env-file .env -f compose.yaml up -d --no-deps --wait hail-app
+curl --fail --silent --show-error https://hailproto.app/health/ready
+docker compose --env-file .env -f compose.yaml up -d --no-deps --wait hail-dev
+curl --fail --silent --show-error https://hailproto.dev/health/ready
 docker compose --env-file .env -f compose.yaml ps
 docker compose --env-file .env -f compose.yaml exec -T app-db \
   psql -U hail -d hail -Atc 'SELECT max(version) FROM schema_migrations;'
@@ -288,10 +327,13 @@ docker compose --env-file .env -f compose.yaml exec -T dev-db \
   psql -U hail -d hail -Atc 'SELECT max(version) FROM schema_migrations;'
 ```
 
-Both migration queries must print `11`. Check HTTPS readiness from outside the
-VPS and examine provider logs for startup or publisher errors before sending.
-Migration rollback requires restoration from the pre-rollout dumps; merely
-replacing the image does not undo committed schema or messages.
+For the current release, both migration queries must print `31` (the original
+delivery-only release printed `11`). Check HTTPS readiness from outside the
+VPS and examine provider logs before sending. Prefer forward repair after a
+committed transfer; restoring pre-cutover data requires reconciling PLC and
+both providers. Merely replacing an image does not undo schema, messages or
+PLC operations, and pre-migration-31 code cannot represent both collocated
+Grant roles.
 
 For the end-to-end demonstration, create a **new** Bob-to-Alice Grant, because
 the earlier example Grant is terminally revoked. Use the Grant creation and
@@ -302,12 +344,12 @@ UUIDv7, `body_digest` to the digest printed by the first command below, and
 
 ```bash
 docker compose --env-file .env -f compose.yaml exec hail-app \
-  bun run body:publish -- did:plc:rewawq7tylmrzaaprd27sdhb examples/alice-body.txt
+  bun run body:publish -- "$alice_did" examples/alice-body.txt
 docker compose --env-file .env -f compose.yaml exec hail-app \
-  bun run envelope:create -- did:plc:rewawq7tylmrzaaprd27sdhb \
+  bun run envelope:create -- "$alice_did" \
   "$grant_id" "$body_digest" updates
 docker compose --env-file .env -f compose.yaml exec hail-app \
-  bun run envelope:submit -- did:plc:rewawq7tylmrzaaprd27sdhb "$message_id"
+  bun run envelope:submit -- "$alice_did" "$message_id"
 ```
 
 The envelope command atomically persists the signed bytes and a hashed bearer
@@ -349,12 +391,11 @@ commit IDs in the protocol implementation log.
 ## Reply-Capability Rollout
 
 Migration 12 adds single-use reply invitations and explicit authorization
-lineage to sent and received envelopes. Before replacing either provider,
-repeat the two `pg_dump -Fc` and `pg_restore --list` backup commands above
-using a fresh `pre-reply-<UTC timestamp>` directory; keep both dumps and the
-current provider image. Rebuild the shared provider image, replace `hail-app`
-and `hail-dev`, check that **both** databases report schema version `12`, and
-confirm both public readiness endpoints and provider logs are healthy.
+lineage to sent and received envelopes. It is already included in the current
+migration-31 release. For an upgrade, use the backup and one-provider-at-a-time
+rollout procedure above; the original reply-only release reported version
+`12`, while the current release reports `31`. Confirm both public readiness
+endpoints and provider logs are healthy before the reply walkthrough.
 Existing Grant envelopes and messages remain valid.
 
 The prior demonstration Grant is terminally revoked, and the original message
@@ -363,7 +404,7 @@ with the commands above. Record its new `grant_id`. Alice publishes a body:
 
 ```bash
 docker compose --env-file .env -f compose.yaml exec -T hail-app \
-  bun run body:publish -- did:plc:rewawq7tylmrzaaprd27sdhb examples/alice-body.txt
+  bun run body:publish -- "$alice_did" examples/alice-body.txt
 ```
 
 Set `body_digest` to its printed digest. Choose a future reply deadline (here,
@@ -372,7 +413,7 @@ Set `body_digest` to its printed digest. Choose a future reply deadline (here,
 ```bash
 reply_until=$(($(date -u +%s) + 2592000))
 docker compose --env-file .env -f compose.yaml exec -T hail-app \
-  bun run envelope:create -- did:plc:rewawq7tylmrzaaprd27sdhb \
+  bun run envelope:create -- "$alice_did" \
   "$grant_id" "$body_digest" updates --reply-until "$reply_until"
 ```
 
@@ -381,7 +422,7 @@ submit it:
 
 ```bash
 docker compose --env-file .env -f compose.yaml exec -T hail-app \
-  bun run envelope:submit -- did:plc:rewawq7tylmrzaaprd27sdhb "$original_message_id"
+  bun run envelope:submit -- "$alice_did" "$original_message_id"
 ```
 
 Wait until Bob has accepted and durably delivered that message. On **Bob's**
@@ -389,14 +430,14 @@ provider, publish a reply body:
 
 ```bash
 docker compose --env-file .env -f compose.yaml exec -T hail-dev \
-  bun run body:publish -- did:plc:ih42yibclij7lv6264hoaodo examples/alice-body.txt
+  bun run body:publish -- "$bob_did" examples/alice-body.txt
 ```
 
 Set `reply_body_digest` to the printed digest, then create the reply:
 
 ```bash
 docker compose --env-file .env -f compose.yaml exec -T hail-dev \
-  bun run envelope:reply -- did:plc:ih42yibclij7lv6264hoaodo \
+  bun run envelope:reply -- "$bob_did" \
   "$original_message_id" "$reply_body_digest"
 ```
 
@@ -405,7 +446,7 @@ submit it:
 
 ```bash
 docker compose --env-file .env -f compose.yaml exec -T hail-dev \
-  bun run envelope:submit -- did:plc:ih42yibclij7lv6264hoaodo "$reply_message_id"
+  bun run envelope:submit -- "$bob_did" "$reply_message_id"
 ```
 
 Bob needs no Grant from Alice for this reply. Check Alice's `delivery_work` and
@@ -426,10 +467,12 @@ rollback after migration 12 requires reconciliation of any reply records
 created since the upgrade; restore from the pre-reply dumps for a full
 rollback.
 
-## Protected-Response And PLC-Read Hardening Rollout
+## Protected-Response And PLC-Read Hardening Rollout (Historical)
 
-This slice makes **no schema change**: both databases should remain at
-migration 12. It shares one bounded work budget across envelope and status
+The September 28 hardening slice made **no schema change** and left both
+databases at migration 12; the current deployment is at 31. The original
+rollout details below describe that earlier release. It shares one bounded
+work budget across envelope and status
 receivers and replaces unbounded private PLC reads with a five-second
 cancellable request/stream deadline, a 1 MiB decoded response limit, strict
 JSON parsing, and no redirects. The pinned official client still performs
@@ -459,8 +502,9 @@ test. Compare measured timing distributions to the recorded pre-rollout
 baseline, then inspect provider logs and work-queue state.
 
 Because this slice adds no migration, restoring the tagged prior provider
-image is an image-only runtime rollback. Keep the pre-rollout logical backups
-as independent recovery evidence. A complete response-floor calibration under
+image was an image-only runtime rollback at that earlier checkpoint, not a
+rollback recipe for the current collocated-Grant release. Keep the pre-rollout
+logical backups as recovery evidence. A complete response-floor calibration under
 sustained load, source-network limits, write timeout policy, and fenced
 provider migration remain separate hardening work.
 
@@ -486,22 +530,25 @@ docker compose --env-file .env -f compose.yaml ps
 docker compose --env-file .env -f compose.yaml logs --since 10m
 ```
 
-Stop containers without deleting data:
+Stop containers without deleting data or the networks used by the separate
+monitor stack:
 
 ```bash
-docker compose --env-file .env -f compose.yaml down
+docker compose --env-file .env -f compose.yaml stop
 ```
 
 Never use `down --volumes` on the deployed POC. The named volumes contain the
 PLC operation log, provider identities, encrypted private keys, bindings, and
-protocol state, including Grant tombstones and publication attempts. Migration
-7 is append-only and has no destructive down migration. Rollback after applying
-it means restoring a tested pre-migration logical backup or continuing with the
-new schema; do not edit an applied migration or delete Grant rows. VPS snapshots
+protocol state, including Grant tombstones and publication attempts. Applied
+migrations are forward-only; use a compatible runtime or forward repair,
+and reconcile PLC/provider ownership before any restoration. Do not edit an
+applied migration or delete Grant rows. Stop/restart the separate monitor
+through its own Compose file; a stopped PLC cannot supply it with fresh
+coverage. VPS snapshots
 are useful but do not replace tested PostgreSQL
 logical backups or an independent encrypted copy of `.env`.
 
-## Current POC
+## Deployment History
 
 The first public POC was deployed on 2026-09-27:
 
