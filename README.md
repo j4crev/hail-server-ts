@@ -324,3 +324,19 @@ source verifies the target's activation receipt before retiring. Signed files mu
 be private mode `0600`, transferred over an authenticated administrative
 channel, and kept apart from the provider-held user vault/recovery secret.
 No signed cutover is submitted automatically by starting the web server.
+
+To rehearse message continuity with a user-held identity, the source POC
+provider can prepare a Grant after verifying the sender address and profile:
+
+```text
+source: poc:grant-propose -- <user-address> <sender-address> <offered-category> <new-proposal-file>
+client: poc:sign-grant -- <user-vault> <proposal-file> <reviewed-own-address> <reviewed-sender-address> <new-signed-grant.cose>
+source: poc:grant-import -- <user-address> <sender-address> <signed-grant.cose>
+source: grant:publish -- --once
+```
+
+The client signs with its own `#hail-identity` key; the source re-verifies
+the exact Address Binding, Sender Profile, chosen scope and consent hashes
+before queuing publication. Import of unchanged signed bytes is idempotent.
+An accepted message with a pending delivery obligation can then be used to
+test more than empty-account transfer.

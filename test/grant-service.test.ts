@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
   createWebCryptoVerifier,
+  createWebCryptoSigner,
+  signPayload,
   verifySignedPayload,
   type HailGrant,
   type HailGrantScope,
@@ -190,6 +192,32 @@ function uuidTimestamp(uuid: string): number {
 }
 
 describe("GrantService", () => {
+  it("imports only an exact user-key-signed Grant against current address and profile evidence", async () => {
+    const context = fixture();
+    const proposed = await context.service.prepareUserSignedGrant(account.canonicalAddress,
+      context.address.address, definition);
+    expect(proposed.scope).toEqual([{ type: "categories", values: ["receipts", "security-alerts"] }]);
+    expect(context.accounts.getKey).not.toHaveBeenCalled();
+    expect(context.decrypt).not.toHaveBeenCalled();
+    const signer = await crypto.subtle.importKey("pkcs8", Uint8Array.from(identityPkcs8),
+      "Ed25519", false, ["sign"]);
+    const representation = await signPayload("hail.grant", proposed,
+      createWebCryptoSigner(`${grantorDid}#hail-identity`, signer));
+    const imported = await context.service.acceptUserSignedGrant(account.canonicalAddress,
+      context.address.address, representation);
+    expect(imported.payload).toEqual(proposed);
+    expect(imported.signingPublicKey).toBe(identityDidKey);
+    expect(context.insertAuthoritativeRevision1).toHaveBeenCalledOnce();
+    expect(context.accounts.getKey).not.toHaveBeenCalled();
+    expect(context.decrypt).not.toHaveBeenCalled();
+    expect((await context.service.acceptUserSignedGrant(account.canonicalAddress,
+      context.address.address, representation)).representation).toEqual(representation);
+    const forged = Uint8Array.from(representation);
+    forged[forged.length - 1] = forged[forged.length - 1]! ^ 1;
+    await expect(context.service.acceptUserSignedGrant(account.canonicalAddress,
+      context.address.address, forged)).rejects.toThrow();
+  });
+
   it("creates revision 1 signed by hail-identity with UUIDv7, timestamps, and consent hashes", async () => {
     const context = fixture();
     const created = await context.service.createOrReuse(

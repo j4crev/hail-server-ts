@@ -1,7 +1,9 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { cidForCbor } from "@atproto/common";
 import { formatDidDoc, PlcClientError, validateOperationLog, type Operation } from "@did-plc/lib";
-import { decodeDeterministic, encodeBase64Url, inspectSignedPayload,
+import { decodeBase64Url, decodeDeterministic, encodeBase64Url, inspectSignedPayload,
   type HailAddressBinding } from "@hailproto/codec";
 import { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -170,34 +172,57 @@ integration("private PLC transfer between disposable POC providers", () => {
     const sourceTransfer = new MigrationTransferService(source.sql, sourceRepo,
       sourceEncryptor, resolver, oldBase);
     const signedSnapshot = await sourceTransfer.exportFenced((await sourceFence.get(genesis.did))!);
-    const cutover = await client.signPlcOperation({ type: "plc_operation",
-      prev: (await cidForCbor(genesis.operation)).toString(),
-      rotationKeys: [prepared.userRecoveryKey, offer.destination_rotation_key],
-      verificationMethods: { "hail-identity": prepared.userIdentityKey,
-        "hail-messaging": offer.destination_messaging_key }, alsoKnownAs: [],
-      services: { hail: { type: "HailMessaging", endpoint: newBase } },
-    });
-    const consent = await client.signMigrationConsent({ type: "hail.portable-migration-consent",
-      version: 1, did: genesis.did, transfer_id: offer.transfer_id,
-      snapshot_digest: signedSnapshot.digest,
-      plc_operation_sha256: new Uint8Array(createHash("sha256").update(cutover.dagCbor).digest()),
-      source_service_base: oldBase, destination_service_base: newBase,
-      destination_address: destinationAddress,
-      destination_rotation_key: offer.destination_rotation_key,
-      destination_messaging_key: offer.destination_messaging_key,
-      user_recovery_key: prepared.userRecoveryKey, user_identity_key: prepared.userIdentityKey,
-      created_at: now, expires_at: now + 3600,
-    });
-    const binding: HailAddressBinding = { type: "hail.address-binding", version: 1,
-      address: destinationAddress, did: genesis.did, issued_at: now,
-      expires_at: now + 90 * 86400, key_id: `${genesis.did}#hail-identity` };
-    const destinationBinding = await client.signAddressBinding(binding);
+    const ceremony = await mkdtemp("/tmp/opencode/hail-cutover-client-");
+    let operationBytes: Uint8Array;
+    let destinationBinding: Uint8Array;
+    let consent: { payloadBytes: Uint8Array; signature: Uint8Array };
+    let operationCid: string;
+    try {
+      const paths = { vault: join(ceremony, "vault.json"), snapshot: join(ceremony, "snapshot.json"),
+        offer: join(ceremony, "offer.json"), reservation: join(ceremony, "reservation.json"),
+        consent: join(ceremony, "consent.json"), operation: join(ceremony, "operation.json"),
+        binding: join(ceremony, "binding.cose") };
+      await Promise.all([
+        writeFile(paths.vault, JSON.stringify(client.vault), { mode: 0o600 }),
+        writeFile(paths.snapshot, JSON.stringify({ type: "hail.portable-migration-transfer",
+          version: 2, manifest: encodeBase64Url(signedSnapshot.bytes),
+          digest: encodeBase64Url(signedSnapshot.digest),
+          signature: encodeBase64Url(signedSnapshot.signature),
+          sourceMessagingPublicKey: signedSnapshot.sourceMessagingPublicKey }), { mode: 0o600 }),
+        writeFile(paths.offer, JSON.stringify({ payload: encodeBase64Url(offered.payloadBytes),
+          signature: encodeBase64Url(offered.signature) }), { mode: 0o600 }),
+        writeFile(paths.reservation, JSON.stringify({ payload: encodeBase64Url(reservation.payloadBytes),
+          signature: encodeBase64Url(reservation.signature) }), { mode: 0o600 }),
+      ]);
+      const runClient = async () => {
+        const child = Bun.spawn(["bun", "src/cli/sign-private-poc-cutover.ts",
+          paths.vault, paths.snapshot, paths.offer, paths.reservation,
+          paths.consent, paths.operation, paths.binding],
+        { cwd: new URL("../../hail-user-client-ts/", import.meta.url).pathname,
+          stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+        child.stdin.write(`${encodeBase64Url(vault.recoverySecret)}\n`);
+        child.stdin.end();
+        if (await child.exited !== 0) throw new Error(await new Response(child.stderr).text());
+      };
+      await runClient();
+      const firstOperation = await readFile(paths.operation);
+      const firstConsent = await readFile(paths.consent);
+      const firstBinding = await readFile(paths.binding);
+      await runClient();
+      expect(await readFile(paths.operation)).toEqual(firstOperation);
+      expect(await readFile(paths.consent)).toEqual(firstConsent);
+      expect(await readFile(paths.binding)).toEqual(firstBinding);
+      operationBytes = new Uint8Array(firstOperation);
+      destinationBinding = new Uint8Array(firstBinding);
+      const row = JSON.parse(firstConsent.toString("utf8")) as { payload: string; signature: string };
+      consent = { payloadBytes: decodeBase64Url(row.payload), signature: decodeBase64Url(row.signature) };
+      operationCid = (await cidForCbor(JSON.parse(firstOperation.toString("utf8")) as Operation)).toString();
+    } finally { await rm(ceremony, { recursive: true, force: true }); }
     const targetTransfer = new MigrationTransferService(target.sql, sourceRepo,
       targetEncryptor, resolver, newBase);
-    await targetTransfer.stageImport(signedSnapshot, consent,
-      new TextEncoder().encode(JSON.stringify(cutover.operation)), destinationBinding);
+    await targetTransfer.stageImport(signedSnapshot, consent, operationBytes, destinationBinding);
     expect(await new PrivatePocPlcSubmission(target.sql, plc, registry, newBase)
-      .submit(offer.transfer_id)).toBe(cutover.cid);
+      .submit(offer.transfer_id)).toBe(operationCid);
     const gate = new PrivatePocCutoverGate(target.sql, { origin: registry,
       resolver, audit: (value) => plc.getAuditableLog(value) }, registry, newBase);
     expect((await gate.assess(offer.transfer_id)).eligible).toBe(true);

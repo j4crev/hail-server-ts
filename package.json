@@ -17,6 +17,8 @@
     "poc:publish-address": "bun src/cli/publish-private-poc-address.ts",
     "poc:activate-transfer": "bun src/cli/activate-private-poc-transfer.ts",
     "poc:retire-source": "bun src/cli/retire-private-poc-source.ts",
+    "poc:grant-propose": "bun src/cli/propose-private-poc-grant.ts",
+    "poc:grant-import": "bun src/cli/import-private-poc-grant.ts",
     "profile:create": "bun src/cli/create-profile.ts",
     "profile:verify": "bun src/cli/verify-profile.ts",
     "grant:create": "bun src/cli/create-grant.ts",

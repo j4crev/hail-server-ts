@@ -19,6 +19,7 @@ import type { HailDidResolver } from "../plc/resolver.js";
 import type { PlcResolutionEvidence } from "../plc/resolver.js";
 import type { SenderProfileVerifier } from "../profiles/verifier.js";
 import type { GrantStore, SignedGrantRevision, SignedGrantRevisionInput } from "./store.js";
+import { inspectSignedPayload } from "@hailproto/codec";
 
 export interface GrantAccountRepository {
   getAccountByAddress(address: string): Promise<AccountRecord>;
@@ -69,6 +70,91 @@ export class GrantService {
     private readonly expectedServiceBase: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
+
+  // User-held identities sign outside the provider. The proposal has no
+  // authority until the current #hail-identity key signs its exact Hail bytes.
+  async prepareUserSignedGrant(grantorAddressInput: string,
+    granteeAddressInput: string, input: GrantDefinition): Promise<HailGrant> {
+    const grantor = await this.accounts.getAccountByAddress(canonicalizeHailAddress(grantorAddressInput));
+    if (grantor.state !== "active" || grantor.activationVerificationMode !== "public" || !grantor.did) {
+      throw new Error("Grantor must be an externally verified active account");
+    }
+    const current = await this.resolver.resolve(grantor.did);
+    if (current.serviceBase !== this.expectedServiceBase) {
+      throw new Error("Current PLC does not name this grantor provider");
+    }
+    const address = await this.addressVerifier.verify(canonicalizeHailAddress(granteeAddressInput));
+    const profile = await this.profileVerifier.verify(address.did);
+    if (profile.did !== address.did || profile.serviceBase !== address.serviceBase ||
+      profile.messagingDidKey !== address.messagingDidKey) {
+      throw new Error("Grantee Address Binding and Sender Profile disagree");
+    }
+    const scope = normalizeScope(input.scope);
+    validateScopeAgainstProfile(scope, profile.profile);
+    const now = Math.floor(this.now().getTime() / 1000);
+    if (input.expiresAt !== null && input.expiresAt <= now) throw new Error("Grant expiry is already past");
+    if (await this.grants.findActiveAuthoritativeByDidPair(grantor.did, address.did)) {
+      throw new Error("This DID pair already has an active authoritative Grant");
+    }
+    return { type: "hail.grant", version: 1, grant_id: uuidV7(this.now().getTime()),
+      revision: 1, previous: null, grantor: grantor.did, grantee: address.did,
+      scope: [scope], status: "active", issued_at: now, updated_at: now,
+      expires_at: input.expiresAt,
+      consent_context: { grantee_address: address.address,
+        address_binding_hash: digest(address.digest), sender_profile_hash: digest(profile.digest) },
+      key_id: `${grantor.did}#hail-identity` };
+  }
+
+  async acceptUserSignedGrant(grantorAddressInput: string,
+    granteeAddressInput: string, representation: Uint8Array): Promise<SignedGrantRevision> {
+    if (representation.length < 1 || representation.length > 262_144) throw new Error("Grant exceeds its limit");
+    const grantor = await this.accounts.getAccountByAddress(canonicalizeHailAddress(grantorAddressInput));
+    if (grantor.state !== "active" || grantor.activationVerificationMode !== "public" || !grantor.did) {
+      throw new Error("Grantor account is not active and externally verified");
+    }
+    const resolved = await this.resolver.resolve(grantor.did);
+    if (resolved.serviceBase !== this.expectedServiceBase) throw new Error("Grantor provider is no longer current");
+    const payload = inspectSignedPayload("hail.grant", representation).payload;
+    if (payload.grantor !== grantor.did || payload.key_id !== `${grantor.did}#hail-identity` ||
+      payload.revision !== 1 || payload.previous !== null || payload.status !== "active" ||
+      payload.updated_at !== payload.issued_at) throw new Error("User-signed initial Grant has invalid authority");
+    await verifySignedPayload("hail.grant", representation,
+      createWebCryptoVerifier(async (kid) => {
+        if (kid !== `${grantor.did}#hail-identity`) throw new Error("Unexpected Grant identity signer");
+        return ed25519PublicKeyFromDidKey(resolved.identityDidKey);
+      }));
+    const now = Math.floor(this.now().getTime() / 1000);
+    if (payload.issued_at > now + 300 ||
+      (payload.expires_at !== null && payload.expires_at <= now)) {
+      throw new Error("User-signed Grant is stale or expired");
+    }
+    const address = await this.addressVerifier.verify(canonicalizeHailAddress(granteeAddressInput));
+    const profile = await this.profileVerifier.verify(address.did);
+    if (payload.grantee !== address.did ||
+      payload.consent_context.grantee_address !== address.address ||
+      profile.did !== address.did || profile.serviceBase !== address.serviceBase ||
+      profile.messagingDidKey !== address.messagingDidKey ||
+      !Buffer.from(payload.consent_context.address_binding_hash.value).equals(Buffer.from(address.digest)) ||
+      !Buffer.from(payload.consent_context.sender_profile_hash.value).equals(Buffer.from(profile.digest))) {
+      throw new Error("Grant consent no longer matches current verified grantee evidence");
+    }
+    if (payload.scope.length !== 1 ||
+      !isDeepStrictEqual(payload.scope[0], normalizeScope(payload.scope[0]!))) {
+      throw new Error("User Grant scope is not canonical");
+    }
+    validateScopeAgainstProfile(payload.scope[0]!, profile.profile);
+    const existing = await this.grants.findActiveAuthoritativeByDidPair(grantor.did, address.did);
+    if (existing) {
+      if (Buffer.from(existing.representation).equals(Buffer.from(representation))) return existing;
+      throw new Error("An active different Grant already exists for these DIDs");
+    }
+    const signed: SignedGrantRevisionInput = { localAccountId: grantor.id, localRole: "grantor",
+      payload, representation, digest: new Uint8Array(createHash("sha256").update(representation).digest()),
+      signingPublicKey: resolved.identityDidKey, signingPlcEvidence: resolved.evidence };
+    await this.grants.insertAuthoritativeRevision1({ revision: signed,
+      consent: { address, senderProfile: profile }, destinationServiceBase: address.serviceBase });
+    return { ...signed, receivedAt: this.now() };
+  }
 
   async createOrReuse(
     grantorAddressInput: string,
