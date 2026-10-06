@@ -754,3 +754,24 @@ It was built from the verified continuity and restart-recovery changes on
 top of provider `66acf0c`. Both live databases are at
 migration 31. Disposable restore databases were removed after verification;
 the backups and archived signed activation receipt were retained.
+
+## Same-VPS monitor POC
+
+The October 6 follow-up deployed the sibling `hail-plc-monitor-ts` stack with
+its own PostgreSQL database, alert-signing key and durable signed-alert receipt
+sink. Caddy forwards only `https://hailproto.app/poc/monitor-alerts` to the sink;
+all other provider routes retain their existing upstreams. The candidate
+Caddyfile was validated before restart, and both providers stayed ready.
+
+The monitor consumed the private PLC export from sequence zero, enrolled four
+existing POC DIDs and exercised a new disposable PLC-only DID. Three new
+operations advanced the cursor to 9. Two signed HTTPS alerts were verified,
+acknowledged and retained across monitor/receiver restart; a reviewed planned
+change was approved, while the subsequent unexpected change did not overwrite
+that expected CID. No provider/user keys were given to the monitor.
+
+This deployment is labeled `private-poc`, leaves independent attestation
+unconfigured and does not satisfy the production independent-monitor gate.
+Operational commands, secret handling and exact proof IDs are in the sibling
+`hail-plc-monitor-ts/deploy/poc/README.md`. The pre-change Caddyfile is retained
+at `/var/backups/hail-poc/pre-monitor-Caddyfile-20261006`.
