@@ -45,7 +45,8 @@ import { DeliveryWorker } from "../src/delivery/worker.js";
 const integration = process.env.DATABASE_URL && process.env.TRANSFER_TARGET_DATABASE_URL ? describe : describe.skip;
 const sourceBase = "https://source.example.com/hail";
 const targetBase = "https://target.example.com/hail";
-const remoteDid = `did:plc:${"b".repeat(24)}`;
+const remoteDid = `did:plc:${Array.from(randomBytes(24), (value) =>
+  "abcdefghijklmnopqrstuvwxyz234567"[value % 32]).join("")}`;
 
 integration("fenced transfer and concurrent cutover", () => {
   const id = randomUUID();
@@ -868,6 +869,25 @@ integration("fenced transfer and concurrent cutover", () => {
     await expect(targetGate.assess(fence.transferId, badMonitor)).rejects.toThrow("signature is invalid");
   });
 
+  it("preserves a sender's existing copy of the same Grant when providers become collocated", async () => {
+    const senderAccountId = randomUUID();
+    await target.sql`INSERT INTO provider_accounts (id, tenant_id, canonical_address, did,
+      onboarding_state, activated_at, activation_binding_digest, activation_verification_mode)
+      VALUES (${senderAccountId}, ${randomUUID()}, ${`fixture-sender-${senderAccountId}@target.example.com`},
+        ${remoteDid}, 'active', now(), ${randomBytes(32)}, 'public')`;
+    const revisions = await source.sql<{ cose: Uint8Array }[]>`
+      SELECT cose FROM grant_revisions WHERE grant_id = ${grantId} AND revision = 1`;
+    const copy = await new GrantRepository(target.sql).acceptReceivedRevision({
+      localAccountId: senderAccountId, payload: initialGrant,
+      representation: new Uint8Array(revisions[0]!.cose), digest: initialGrantDigest,
+      signingPublicKey: userIdentityPublicKey,
+      signingPlcEvidence: (await resolver.resolve(did)).evidence,
+    });
+    expect(copy.localRole).toBe("grantee");
+    expect((await new GrantRepository(target.sql).findReceivedForSender(grantId, remoteDid))?.localAccountId)
+      .toBe(senderAccountId);
+  });
+
   it("materializes the entire domain only after finality and external address verification", async () => {
     const fence = (await fenceService.get(did))!;
     const newState = await validateOperationLog(did, [genesisOperation, signedCutoverOperation]);
@@ -911,6 +931,19 @@ integration("fenced transfer and concurrent cutover", () => {
     expect(pending[0]?.state).toBe("staged");
     await target.sql`DELETE FROM provider_accounts WHERE id = ${occupiedId}`;
     expect(await activation.activate(fence.transferId, await report())).toEqual({ did, accountId: id });
+    const collocated = await target.sql<{ local_role: string; local_account_id: string }[]>`
+      SELECT local_role, local_account_id FROM grant_lineages WHERE grant_id = ${grantId}`;
+    expect(collocated[0]).toMatchObject({ local_role: "grantor", local_account_id: id });
+    expect((await new GrantRepository(target.sql).findReceivedForSender(grantId, remoteDid))?.localRole)
+      .toBe("grantee");
+    const grants = new GrantRepository(target.sql);
+    const received = await grants.findReceivedForSender(grantId, remoteDid);
+    expect(await grants.findReceivedForSender(grantId, did)).toBeNull();
+    expect((await grants.acceptReceivedRevision({ localAccountId: received!.localAccountId,
+      payload: received!.payload, representation: received!.representation, digest: received!.digest,
+      signingPublicKey: received!.signingPublicKey, signingPlcEvidence: received!.signingPlcEvidence,
+    })).localRole).toBe("grantee");
+    expect((await grants.findCurrentByGrantId(grantId))?.localRole).toBe("grantor");
     const account = await target.sql<{ onboarding_state: string; canonical_address: string }[]>`
       SELECT onboarding_state, canonical_address FROM provider_accounts WHERE did = ${did}`;
     expect(account[0]).toMatchObject({ onboarding_state: "active", canonical_address: signedBinding.address });
@@ -925,6 +958,11 @@ integration("fenced transfer and concurrent cutover", () => {
     const work = await target.sql<{ state: string; lease_token: string | null }[]>`
       SELECT state, lease_token FROM delivery_work WHERE sender_did = ${remoteDid} AND message_id = ${incoming.message_id}`;
     expect(work[0]).toMatchObject({ state: "accepted", lease_token: null });
+    // Other disposable fixtures may have left due work in a reused test DB;
+    // ensure this single worker claim measures the imported DID's obligation.
+    await target.sql`UPDATE delivery_work SET next_attempt_at = now() + interval '1 day'
+      WHERE state IN ('accepted', 'on-hold')
+        AND NOT (sender_did = ${remoteDid} AND message_id = ${incoming.message_id})`;
     const worker = new DeliveryWorker(new DeliveryRepository(target.sql), {
       async retrieve() { throw new Error("An expired accepted envelope must not fetch a body"); },
     }, () => new Date(cutoverClock));
@@ -947,8 +985,8 @@ integration("fenced transfer and concurrent cutover", () => {
     expect((await fenceService.get(did))?.state).toBe("exported");
     await retiredSource.retire(did, fence.transferId, receipt);
     expect((await fenceService.get(did))?.state).toBe("retired");
-    await expect(retiredSource.retire(did, fence.transferId, receipt)).rejects.toThrow("cannot retire");
-    await expect(activation.activate(fence.transferId, await report())).rejects.toThrow("staged");
+    await retiredSource.retire(did, fence.transferId, receipt);
+    expect(await activation.activate(fence.transferId, await report())).toEqual({ did, accountId: id });
     const outgoing = inspectSignedPayload("hail.envelope", replyableEnvelope).payload;
     const tokenHash = createHash("sha256").update(outgoing.body.access.token).digest();
     expect(await new BodyRepository(source.sql).retrieve(outgoing.body.digest.value, tokenHash,

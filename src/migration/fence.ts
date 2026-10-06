@@ -274,7 +274,7 @@ export class MigrationFenceService {
         FROM provider_migration_fences WHERE did = ${did} AND transfer_id = ${transferId} FOR UPDATE
       `;
       const fence = fences[0];
-      if (!fence || fence.state !== "exported" || !fence.snapshot_digest ||
+      if (!fence || !["exported", "retired"].includes(fence.state) || !fence.snapshot_digest ||
         resolved.did !== did || resolved.serviceBase !== fence.destination_service_base ||
         resolved.messagingDidKey !== fence.destination_messaging_public_key) {
         throw new Error("Old provider cannot retire before authenticated destination cutover");
@@ -288,6 +288,15 @@ export class MigrationFenceService {
         throw new Error("Destination activation receipt does not match the fenced snapshot");
       }
       const bytes = encodeDeterministic({ payload: signed.payloadBytes, signature: signed.signature });
+      if (fence.state === "retired") {
+        const saved = await tx<{ retirement_receipt_bytes: Uint8Array }[]>`
+          SELECT retirement_receipt_bytes FROM provider_migration_fences
+          WHERE did = ${did} AND transfer_id = ${transferId}`;
+        if (!Buffer.from(saved[0]!.retirement_receipt_bytes).equals(Buffer.from(bytes))) {
+          throw new Error("Retired transfer has another activation receipt");
+        }
+        return;
+      }
       await tx`
         UPDATE provider_migration_fences SET state = 'retired', retirement_receipt_bytes = ${bytes},
           retired_at = clock_timestamp(), updated_at = clock_timestamp()

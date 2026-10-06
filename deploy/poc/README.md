@@ -677,3 +677,80 @@ migration-30 image. Afterwards the old demo address returned `404`, while
 the new dev address, its Sender Profile and both older custodial addresses
 returned `200`. Both live databases remain at migration 30, and both
 containers are healthy with zero restarts.
+
+## October 6, 2026: pending-message continuity and recovery
+
+New user-held DID `did:plc:wmw2k7etmemhq3kw5tcjkj7n` moved dev → app in
+transfer `b52605c3-a472-4a7a-94c1-8fa967b887f2`. Alice's message
+`01a10f3b-f108-766a-b99f-647cc384fd1a` was accepted at dev before the fence.
+Its signed delivery deadline was October 13, 03:27:29 UTC (envelope expiry
+plus the 300-second delivery allowance); body/access availability extended
+past that deadline. The temporary hold trigger was removed before cutover.
+
+The initial activation failed transactionally because app already held Alice's
+grantee copy of Grant `01a10f3a-c34c-79b4-b56b-96554579f160`. Migration 31
+preserves one immutable revision chain with authoritative grantor ownership
+and a second `collocated_grant_receivers` reference. The importing transaction
+requires matching roles/DIDs/current metadata and exact revision bytes.
+Do not delete the sender's Grant copy to bypass this collision.
+
+Before rollout, restored app/dev/PLC dumps from
+`/var/backups/hail-poc/pre-collocated-grant-fix-20261006T033731Z` into separate
+`collocated_restore_{app,dev,plc}_20261006` databases. Applied migration 31 to
+the provider copies and activated the actual failed staged transfer in the
+app copy, using read-only live PLC/HTTPS verification. No restored server or
+delivery worker was started. Both Grant roles and the unattempted accepted
+message survived. The first candidate build exposed an incomplete VPS source
+checkout (missing older migration files); synchronized full source/migrations
+and rebuilt before either running provider was replaced.
+
+Rolled app and dev separately, checking readiness between replacements. The
+live exact staged transfer then activated, and its signed activation receipt
+retired dev. Verified:
+
+- app: `delivered`, revision `2`, one attempt, one `delivered_messages` row;
+- app terminal publication: `acknowledged`, one attempt;
+- dev: retained `accepted`, revision `1`, zero attempts, fence `retired`;
+- old WebFinger: `404`; new WebFinger: `200`; both readiness endpoints: `200`.
+
+The continuity DID had no Sender Profile in its snapshot; no profile was
+invented during import. Use the required `rel=https://hailproto.com/rel/address-binding`
+query when checking WebFinger.
+
+Activation now recovers an already committed active transfer after current
+PLC/key revalidation. Retirement accepts the exact authenticated retained
+receipt on retry. Private signed-record writes accept identical bytes and
+reject conflicts or files with permissions broader than `0600`. Tests cover
+lost PLC responses after commit, exact-operation retries, unavailable
+destination HTTPS, refusal to release an exported fence, and restart after
+activation/retirement. The live CLIs were retried twice after provider restart;
+the recovered receipt SHA-256 matched the archived original:
+`2be991aeccf8d066e8523d19125fac7da89f88af7456dce07e7ed800498b37ba`.
+
+Post-delivery backups are at
+`/var/backups/hail-poc/post-continuity-20261006T034900Z`. Restored all three to
+separate `continuity_restore_{app,dev,plc}_20261006` databases with
+`pg_restore --exit-on-error`, without starting servers/workers or exposing
+ports. Counts and sorted JSON-row fingerprints matched live accounts, keys,
+Grant lineages/revisions, accepted envelopes, delivered messages and sender
+statuses; PLC DID/operation fingerprints also matched. Both provider copies
+passed migration checksum validation, and all seven operational keys per
+provider decrypted successfully with the existing KEK, without printing key
+material. This is a same-host logical restoration drill, not a host-loss or
+independent-device recovery demonstration.
+
+Migration 31 is additive. Retain the migration-30 image `hail-server-ts:poc-66acf0c`
+and backups, but after collocation do not roll runtime back to code that ignores
+the grantee reference. Prefer the tested compatible image or forward repair.
+Restoring pre-cutover data requires reconciling PLC and both providers; it is
+not a standalone rollback. See the protocol repository's
+`docs/production-portable-custody.md` for the checkpoint-based recovery guide.
+
+Local verification: typecheck/build, 107 ordinary tests and 45 sequential
+PostgreSQL integration tests passed. The POC remains `private-poc` / `poc-local`.
+Final tested image: `hail-server-ts:poc-continuity-20261006`, image ID
+`sha256:35e2da4770f5b514829efd0554386790090289c10f17220fe3744852b5a8552d`.
+It was built from the verified continuity and restart-recovery changes on
+top of provider `66acf0c`. Both live databases are at
+migration 31. Disposable restore databases were removed after verification;
+the backups and archived signed activation receipt were retained.

@@ -163,6 +163,11 @@ const migrations: readonly Migration[] = [
     name: "private-poc-onboarding",
     url: new URL("../../migrations/0030_private_poc_onboarding.sql", import.meta.url),
   },
+  {
+    version: 31,
+    name: "collocated-grant-receiver",
+    url: new URL("../../migrations/0031_collocated_grant_receiver.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

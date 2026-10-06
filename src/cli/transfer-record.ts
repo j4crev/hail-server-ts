@@ -18,7 +18,16 @@ export async function readTransferRecord(path: string): Promise<SignedHandshake>
 }
 
 export async function writeTransferRecord(path: string, signed: SignedHandshake): Promise<void> {
-  const file = await open(path, "wx", 0o600);
+  const file = await open(path, "wx", 0o600).catch(async (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EEXIST") throw error;
+    const saved = await readTransferRecord(path);
+    if (!Buffer.from(saved.payloadBytes).equals(Buffer.from(signed.payloadBytes)) ||
+      !Buffer.from(saved.signature).equals(Buffer.from(signed.signature))) {
+      throw new Error("Existing transfer record differs from the exact signed retry");
+    }
+    return null;
+  });
+  if (!file) return;
   let incomplete = false;
   try { await file.writeFile(JSON.stringify({ payload: encodeBase64Url(signed.payloadBytes),
     signature: encodeBase64Url(signed.signature) })); }

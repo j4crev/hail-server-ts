@@ -210,6 +210,19 @@ export class GrantRepository implements GrantStore {
     return rows[0] ? grantFromRow(rows[0]) : null;
   }
 
+  async findReceivedForSender(grantId: string, senderDid: string): Promise<SignedGrantRevision | null> {
+    const current = await this.findCurrentByGrantId(grantId);
+    if (!current || current.payload.grantee !== senderDid) return null;
+    if (current.localRole === "grantee") return current;
+    const rows = await this.sql<{ grantee_account_id: string }[]>`
+      SELECT local.grantee_account_id FROM collocated_grant_receivers local
+      JOIN provider_accounts account ON account.id = local.grantee_account_id
+      WHERE local.grant_id = ${grantId} AND account.did = ${senderDid}
+        AND account.onboarding_state = 'active'`;
+    return rows[0] ? { ...current, localAccountId: rows[0].grantee_account_id,
+      localRole: "grantee" } : null;
+  }
+
   async findActiveAuthoritativeByDidPair(
     grantorDid: string,
     granteeDid: string,
@@ -373,9 +386,13 @@ export class GrantRepository implements GrantStore {
       `;
       const lineage = lineages[0];
       if (lineage) {
+        const collocated = lineage.local_role === "grantor" ? await transaction<{
+          grantee_account_id: string }[]>`
+            SELECT grantee_account_id FROM collocated_grant_receivers
+            WHERE grant_id = ${input.payload.grant_id} FOR UPDATE` : [];
         if (
-          lineage.local_account_id !== input.localAccountId ||
-          lineage.local_role !== "grantee" ||
+          !(lineage.local_role === "grantee" && lineage.local_account_id === input.localAccountId ||
+            lineage.local_role === "grantor" && collocated[0]?.grantee_account_id === input.localAccountId) ||
           lineage.grantor_did !== input.payload.grantor ||
           lineage.grantee_did !== input.payload.grantee
         ) {
@@ -392,7 +409,7 @@ export class GrantRepository implements GrantStore {
           if (!bytesEqual(existing[0].cose, input.representation)) {
             throw new Error("Grant revision conflicts with previously received exact bytes");
           }
-          return grantFromRow(existing[0]);
+          return { ...grantFromRow(existing[0]), localRole: "grantee", localAccountId: input.localAccountId };
         }
         const currentRows = await transaction<{ grant_updated_at: number | string | bigint }[]>`
           SELECT updated_at AS grant_updated_at FROM grant_revisions
@@ -442,7 +459,7 @@ export class GrantRepository implements GrantStore {
         WHERE lineage.grant_id = ${input.payload.grant_id}
       `;
       if (!rows[0]) throw new Error("Accepted Grant could not be read back");
-      return grantFromRow(rows[0]);
+      return { ...grantFromRow(rows[0]), localRole: "grantee", localAccountId: input.localAccountId };
     });
   }
 

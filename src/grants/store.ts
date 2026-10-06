@@ -62,6 +62,7 @@ export interface ClaimedPublicationResult {
 
 export interface GrantStore {
   findCurrentByGrantId(grantId: string): Promise<SignedGrantRevision | null>;
+  findReceivedForSender?(grantId: string, senderDid: string): Promise<SignedGrantRevision | null>;
   findActiveAuthoritativeByDidPair(
     grantorDid: string,
     granteeDid: string,

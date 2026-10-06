@@ -221,8 +221,16 @@ integration("private PLC transfer between disposable POC providers", () => {
     const targetTransfer = new MigrationTransferService(target.sql, sourceRepo,
       targetEncryptor, resolver, newBase);
     await targetTransfer.stageImport(signedSnapshot, consent, operationBytes, destinationBinding);
-    expect(await new PrivatePocPlcSubmission(target.sql, plc, registry, newBase)
-      .submit(offer.transfer_id)).toBe(operationCid);
+    await expect(sourceFence.releaseBeforeExport(genesis.did, offer.transfer_id))
+      .rejects.toThrow("Only an unexported");
+    const lostResponsePlc = { ...plc, async sendOperation(value: string, operation: Operation) {
+      await plc.sendOperation(value, operation);
+      throw new Error("PLC committed, but its response was lost");
+    } };
+    const submission = new PrivatePocPlcSubmission(target.sql, lostResponsePlc, registry, newBase);
+    expect(await submission.submit(offer.transfer_id)).toBe(operationCid);
+    expect(await submission.submit(offer.transfer_id)).toBe(operationCid);
+    expect(log).toHaveLength(2);
     const gate = new PrivatePocCutoverGate(target.sql, { origin: registry,
       resolver, audit: (value) => plc.getAuditableLog(value) }, registry, newBase);
     expect((await gate.assess(offer.transfer_id)).eligible).toBe(true);
@@ -240,9 +248,20 @@ integration("private PLC transfer between disposable POC providers", () => {
     });
     const activation = new PortableMigrationActivation(target.sql, targetEncryptor, resolver,
       gate, verifier, newBase, registry, undefined, "private-poc");
-    expect(await activation.activate(offer.transfer_id)).toMatchObject({ did: genesis.did });
+    const unavailableAddress = new PortableMigrationActivation(target.sql, targetEncryptor, resolver,
+      gate, { async verify() { throw new Error("Destination HTTPS unavailable"); } },
+      newBase, registry, undefined, "private-poc");
+    await expect(unavailableAddress.activate(offer.transfer_id)).rejects.toThrow("HTTPS unavailable");
+    expect(await targetRepo.getAccountByDid(genesis.did)).toBeNull();
+    expect((await sourceFence.get(genesis.did))?.state).toBe("exported");
+    const activated = await activation.activate(offer.transfer_id);
+    expect(activated).toMatchObject({ did: genesis.did });
+    expect(await activation.activate(offer.transfer_id)).toEqual(activated);
     const receipt = await activation.issueReceipt(offer.transfer_id);
     await sourceFence.retire(genesis.did, offer.transfer_id, receipt);
+    await sourceFence.retire(genesis.did, offer.transfer_id, receipt);
+    await expect(sourceFence.retire(genesis.did, offer.transfer_id,
+      { ...receipt, signature: new Uint8Array(64) })).rejects.toThrow();
     expect((await sourceFence.get(genesis.did))?.state).toBe("retired");
     expect(await sourceRepo.findPublishedByAddress(sourceAddress)).toBeNull();
     expect(await targetRepo.findPublishedByAddress(destinationAddress)).not.toBeNull();

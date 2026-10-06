@@ -81,8 +81,6 @@ export class PortableMigrationActivation {
       throw new Error("Portable activation requires the canonical public PLC write registry");
     }
     if (this.profile === "private-poc") assertPrivatePocRegistry(this.registryOrigin, this.serviceBase);
-    const assessment = await this.gate.assess(transferId, signedMonitor);
-    if (!assessment.eligible) throw new Error("PLC cutover assessment is not eligible");
     const imports = await this.sql<{ state: string; did: string; manifest_bytes: Uint8Array;
       destination_binding_cose: Uint8Array; destination_binding_digest: Uint8Array;
       destination_address: string; signed_plc_operation_bytes: Uint8Array }[]>`
@@ -91,7 +89,23 @@ export class PortableMigrationActivation {
       FROM pending_migration_imports WHERE transfer_id = ${transferId}
     `;
     const pending = imports[0];
+    if (pending?.state === "active") {
+      const manifest = validateTransferManifest(pending.manifest_bytes);
+      const accounts = await this.sql<{ id: string }[]>`
+        SELECT id FROM provider_accounts WHERE id = ${manifest.accountId} AND did = ${pending.did}
+          AND canonical_address = ${pending.destination_address} AND onboarding_state = 'active'`;
+      if (!accounts[0] || manifest.did !== pending.did ||
+        manifest.tables.portable_custody_evidence[0]?.monitor_verification_mode !==
+          (this.profile === "public" ? "independent" : "poc-local") ||
+        manifest.destinationServiceBase !== this.serviceBase ||
+        manifest.transferId !== transferId) throw new Error("Activated transfer ownership no longer matches");
+      // Revalidate current PLC/key authority before recovering a lost completion response.
+      await this.issueReceipt(transferId);
+      return { did: pending.did, accountId: accounts[0].id };
+    }
     if (!pending || pending.state !== "staged") throw new Error("No inactive validated transfer to activate");
+    const assessment = await this.gate.assess(transferId, signedMonitor);
+    if (!assessment.eligible) throw new Error("PLC cutover assessment is not eligible");
     const manifest = validateTransferManifest(pending.manifest_bytes);
     if (manifest.tables.portable_custody_evidence[0]?.monitor_verification_mode !==
       (this.profile === "public" ? "independent" : "poc-local")) {
@@ -228,14 +242,9 @@ export class PortableMigrationActivation {
       `;
       for (const row of manifest.tables.sender_profiles) await insertRow(tx, "sender_profiles", row);
       await this.refreshProfile(tx, manifest, messagingKey, prepared.messagingPublicKey);
-      for (const table of ["grant_lineages", "grant_revisions", "grant_consent_evidence",
-        "grant_publications", "detached_bodies", "body_authorizations"] as const) {
-        for (const row of manifest.tables[table]) {
-          const resumed = table === "grant_publications" && ["pending", "retry"].includes(String(row.state))
-            ? { ...row, lease_token: null, lease_expires_at: null, next_attempt_at: new Date().toISOString() }
-            : row;
-          await insertRow(tx, table, resumed);
-        }
+      await this.importGrants(tx, manifest);
+      for (const table of ["detached_bodies", "body_authorizations"] as const) {
+        for (const row of manifest.tables[table]) await insertRow(tx, table, row);
       }
       await this.importEnvelopes(tx, manifest);
       for (const table of ["reply_capabilities", "delivery_work", "verified_body_provenance",
@@ -266,6 +275,86 @@ export class PortableMigrationActivation {
     const { def } = await import("@did-plc/lib");
     const operation = def.operation.parse(parseJsonWithoutDuplicateKeys(new TextDecoder().decode(bytes)));
     return (await cidForCbor(operation)).toString();
+  }
+
+  private async importGrants(tx: SQL, manifest: TransferManifest): Promise<void> {
+    const pgBytes = (value: unknown): Uint8Array => {
+      if (typeof value !== "string" || !/^\\x(?:[0-9a-f]{2})+$/i.test(value)) {
+        throw new Error("Transferred Grant has an invalid PostgreSQL byte representation");
+      }
+      return new Uint8Array(Buffer.from(value.slice(2), "hex"));
+    };
+    for (const row of manifest.tables.grant_lineages) {
+      const grantId = row.grant_id as string;
+      const existing = await tx<{ local_role: string; local_account_id: string;
+        grantor_did: string; grantee_did: string; current_revision: number;
+        current_status: string; current_digest: Uint8Array }[]>`
+        SELECT local_role, local_account_id, grantor_did, grantee_did,
+          current_revision, current_status, current_digest
+        FROM grant_lineages WHERE grant_id = ${grantId} FOR UPDATE`;
+      if (!existing[0]) { await insertRow(tx, "grant_lineages", row); continue; }
+      const prior = existing[0];
+      const counterpart = await tx<{ did: string | null; onboarding_state: string }[]>`
+        SELECT did, onboarding_state FROM provider_accounts
+        WHERE id = ${prior.local_account_id} FOR UPDATE`;
+      if (prior.grantor_did !== row.grantor_did || prior.grantee_did !== row.grantee_did ||
+        prior.current_revision !== row.current_revision || prior.current_status !== row.current_status ||
+        !Buffer.from(prior.current_digest).equals(Buffer.from(pgBytes(row.current_digest))) ||
+        counterpart[0]?.onboarding_state !== "active" ||
+        row.local_account_id !== manifest.accountId) {
+        throw new Error("Collocated Grant differs from the signed source snapshot");
+      }
+      if (row.local_role === "grantor" && prior.local_role === "grantee" &&
+        counterpart[0].did === prior.grantee_did && row.grantor_did === manifest.did) {
+        await tx`INSERT INTO collocated_grant_receivers (grant_id, grantee_account_id)
+          VALUES (${grantId}, ${prior.local_account_id})`;
+        await tx`UPDATE grant_lineages SET local_account_id = ${manifest.accountId},
+          local_role = 'grantor' WHERE grant_id = ${grantId} AND local_role = 'grantee'`;
+      } else if (row.local_role === "grantee" && prior.local_role === "grantor" &&
+        counterpart[0].did === prior.grantor_did && row.grantee_did === manifest.did) {
+        await tx`INSERT INTO collocated_grant_receivers (grant_id, grantee_account_id)
+          VALUES (${grantId}, ${manifest.accountId})`;
+      } else {
+        throw new Error("Grant cannot have two owners of the same local role");
+      }
+    }
+    for (const row of manifest.tables.grant_revisions) {
+      const existing = await tx<{ cose: Uint8Array; representation_digest: Uint8Array }[]>`
+        SELECT cose, representation_digest FROM grant_revisions
+        WHERE grant_id = ${row.grant_id as string} AND revision = ${row.revision as number}`;
+      if (existing[0]) {
+        if (!Buffer.from(existing[0].cose).equals(Buffer.from(pgBytes(row.cose))) ||
+          !Buffer.from(existing[0].representation_digest).equals(Buffer.from(pgBytes(row.representation_digest)))) {
+          throw new Error("Collocated Grant revision conflicts with retained exact bytes");
+        }
+      } else await insertRow(tx, "grant_revisions", row);
+    }
+    for (const row of manifest.tables.grant_consent_evidence) {
+      const existing = await tx<{ binding_cose: Uint8Array; profile_cose: Uint8Array }[]>`
+        SELECT binding_cose, profile_cose FROM grant_consent_evidence
+        WHERE grant_id = ${row.grant_id as string} AND revision = ${row.revision as number}`;
+      if (existing[0]) {
+        if (!Buffer.from(existing[0].binding_cose).equals(Buffer.from(pgBytes(row.binding_cose))) ||
+          !Buffer.from(existing[0].profile_cose).equals(Buffer.from(pgBytes(row.profile_cose)))) {
+          throw new Error("Collocated Grant consent evidence differs from source");
+        }
+      } else await insertRow(tx, "grant_consent_evidence", row);
+    }
+    for (const row of manifest.tables.grant_publications) {
+      const existing = await tx<{ destination_service_base: string }[]>`
+        SELECT destination_service_base FROM grant_publications
+        WHERE grant_id = ${row.grant_id as string} AND revision = ${row.revision as number}`;
+      if (existing[0]) {
+        if (existing[0].destination_service_base !== row.destination_service_base) {
+          throw new Error("Collocated Grant publication has another destination");
+        }
+      } else {
+        const resumed = ["pending", "retry"].includes(String(row.state))
+          ? { ...row, lease_token: null, lease_expires_at: null, next_attempt_at: new Date().toISOString() }
+          : row;
+        await insertRow(tx, "grant_publications", resumed);
+      }
+    }
   }
 
   private async importEnvelopes(tx: SQL, manifest: TransferManifest): Promise<void> {

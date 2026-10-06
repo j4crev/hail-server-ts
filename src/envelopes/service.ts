@@ -28,7 +28,7 @@ export interface CreatedEnvelope {
 export class EnvelopeService {
   constructor(
     private readonly accounts: SenderAccounts,
-    private readonly grants: Pick<GrantStore, "findCurrentByGrantId">,
+    private readonly grants: Pick<GrantStore, "findCurrentByGrantId" | "findReceivedForSender">,
     private readonly envelopes: Pick<EnvelopeRepository, "publishedBody" | "createSent" | "receivedReplyOpportunity">,
     private readonly encryptor: KeyEncryptor,
     private readonly resolver: HailDidResolver,
@@ -38,7 +38,8 @@ export class EnvelopeService {
 
   async create(senderDid: string, grantId: string, digestText: string, category: string,
     replyUntil: number | null = null): Promise<CreatedEnvelope> {
-    const grant = await this.grants.findCurrentByGrantId(grantId);
+    const grant = await (this.grants.findReceivedForSender?.(grantId, senderDid) ??
+      this.grants.findCurrentByGrantId(grantId));
     const now = this.now();
     if (!grant || grant.localRole !== "grantee" || grant.payload.status !== "active" ||
       grant.payload.grantee !== senderDid || (grant.payload.expires_at !== null && grant.payload.expires_at < now)) {

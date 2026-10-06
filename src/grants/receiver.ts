@@ -159,7 +159,8 @@ export class GrantReceiver {
     }
     let current: SignedGrantRevision | null;
     try {
-      current = await this.grants.findCurrentByGrantId(pathGrantId);
+      current = await (this.grants.findReceivedForSender?.(pathGrantId, payload.grantee) ??
+        this.grants.findCurrentByGrantId(pathGrantId));
     } catch {
       throw new GrantReceiveError(503, "Grant storage is temporarily unavailable");
     }
@@ -202,7 +203,8 @@ export class GrantReceiver {
       });
     } catch (error) {
       if (conflictFromPersistence(error)) {
-        const winner = await this.grants.findCurrentByGrantId(pathGrantId);
+        const winner = await (this.grants.findReceivedForSender?.(pathGrantId, payload.grantee) ??
+          this.grants.findCurrentByGrantId(pathGrantId));
         if (exactRepresentation(winner, representation)) {
           return payload.revision === 1
             ? { status: 412, etag: etag(digest), created: false }

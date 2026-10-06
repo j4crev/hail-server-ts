@@ -503,10 +503,21 @@ export class MigrationTransferService {
     const bindings = await collect(tx`SELECT to_jsonb(t) AS row FROM address_bindings t WHERE account_id = ${accountId} ORDER BY id`);
     const profiles = await collect(tx`SELECT to_jsonb(t) AS row FROM sender_profiles t WHERE account_id = ${accountId} ORDER BY revision`);
     const grants = await collect(tx`SELECT to_jsonb(t) AS row FROM grant_lineages t WHERE local_account_id = ${accountId} ORDER BY grant_id`);
+    const receivedCollocated = await collect(tx`
+      SELECT to_jsonb(lineage) || jsonb_build_object('local_account_id', ${accountId}::text,
+        'local_role', 'grantee') AS row
+      FROM grant_lineages lineage JOIN collocated_grant_receivers local USING (grant_id)
+      WHERE local.grantee_account_id = ${accountId} ORDER BY lineage.grant_id`);
     const grantRevisions = await collect(tx`SELECT to_jsonb(t) AS row FROM grant_revisions t JOIN grant_lineages owner USING (grant_id)
       WHERE owner.local_account_id = ${accountId} ORDER BY t.grant_id, t.revision`);
+    const receivedCollocatedRevisions = await collect(tx`SELECT to_jsonb(t) AS row FROM grant_revisions t
+      JOIN collocated_grant_receivers local USING (grant_id)
+      WHERE local.grantee_account_id = ${accountId} ORDER BY t.grant_id, t.revision`);
     const consent = await collect(tx`SELECT to_jsonb(t) AS row FROM grant_consent_evidence t JOIN grant_lineages owner USING (grant_id)
       WHERE owner.local_account_id = ${accountId} ORDER BY t.grant_id, t.revision`);
+    const receivedCollocatedConsent = await collect(tx`SELECT to_jsonb(t) AS row FROM grant_consent_evidence t
+      JOIN collocated_grant_receivers local USING (grant_id)
+      WHERE local.grantee_account_id = ${accountId} ORDER BY t.grant_id, t.revision`);
     const grantOutbox = await collect(tx`SELECT to_jsonb(t) AS row FROM grant_publications t JOIN grant_lineages owner USING (grant_id)
       WHERE owner.local_account_id = ${accountId} ORDER BY t.grant_id, t.revision`);
     const bodies = await collect(tx`SELECT to_jsonb(t) AS row FROM detached_bodies t WHERE sender_account_id = ${accountId} ORDER BY digest`);
@@ -532,8 +543,10 @@ export class MigrationTransferService {
     return {
       provider_accounts: account, account_keys: keys, portable_custody_evidence: custody,
       plc_operation_evidence: plc,
-      address_bindings: bindings, sender_profiles: profiles, grant_lineages: grants,
-      grant_revisions: grantRevisions, grant_consent_evidence: consent,
+      address_bindings: bindings, sender_profiles: profiles,
+      grant_lineages: [...grants, ...receivedCollocated],
+      grant_revisions: [...grantRevisions, ...receivedCollocatedRevisions],
+      grant_consent_evidence: [...consent, ...receivedCollocatedConsent],
       grant_publications: grantOutbox, detached_bodies: bodies,
       body_authorizations: bodyAuth, sent_envelopes: sent,
       received_envelopes: received, reply_capabilities: replies, delivery_work: work,
