@@ -31,6 +31,10 @@ export interface GrantDefinition {
   expiresAt: number | null;
 }
 
+export class UserGrantError extends Error {
+  constructor(readonly status: 400 | 409, message: string) { super(message); }
+}
+
 function normalizeScope(scope: HailGrantScope): HailGrantScope {
   if (scope.type === "uncategorized") return { type: "uncategorized" };
   return {
@@ -107,42 +111,44 @@ export class GrantService {
 
   async acceptUserSignedGrant(grantorAddressInput: string,
     granteeAddressInput: string, representation: Uint8Array): Promise<SignedGrantRevision> {
-    if (representation.length < 1 || representation.length > 262_144) throw new Error("Grant exceeds its limit");
+    if (representation.length < 1 || representation.length > 262_144) throw new UserGrantError(400, "Grant exceeds its limit");
     const grantor = await this.accounts.getAccountByAddress(canonicalizeHailAddress(grantorAddressInput));
     if (grantor.state !== "active" || grantor.activationVerificationMode !== "public" || !grantor.did) {
-      throw new Error("Grantor account is not active and externally verified");
+      throw new UserGrantError(409, "Grantor account is not active and externally verified");
     }
     const resolved = await this.resolver.resolve(grantor.did);
-    if (resolved.serviceBase !== this.expectedServiceBase) throw new Error("Grantor provider is no longer current");
+    if (resolved.serviceBase !== this.expectedServiceBase) throw new UserGrantError(409, "Grantor provider is no longer current");
     const payload = inspectSignedPayload("hail.grant", representation).payload;
     if (payload.grantor !== grantor.did || payload.key_id !== `${grantor.did}#hail-identity`) {
-      throw new Error("User-signed Grant has invalid authority");
+      throw new UserGrantError(400, "User-signed Grant has invalid authority");
     }
-    await verifySignedPayload("hail.grant", representation,
-      createWebCryptoVerifier(async (kid) => {
-        if (kid !== `${grantor.did}#hail-identity`) throw new Error("Unexpected Grant identity signer");
-        return ed25519PublicKeyFromDidKey(resolved.identityDidKey);
-      }));
+    try {
+      await verifySignedPayload("hail.grant", representation,
+        createWebCryptoVerifier(async (kid) => {
+          if (kid !== `${grantor.did}#hail-identity`) throw new Error("Unexpected Grant identity signer");
+          return ed25519PublicKeyFromDidKey(resolved.identityDidKey);
+        }));
+    } catch { throw new UserGrantError(400, "User-signed Grant signature is invalid"); }
     const now = Math.floor(this.now().getTime() / 1000);
     const signed: SignedGrantRevisionInput = { localAccountId: grantor.id, localRole: "grantor",
       payload, representation, digest: new Uint8Array(createHash("sha256").update(representation).digest()),
       signingPublicKey: resolved.identityDidKey, signingPlcEvidence: resolved.evidence };
     if (payload.issued_at > now + 300 || payload.updated_at > now + 300) {
-      throw new Error("User-signed Grant timestamp is too far ahead");
+      throw new UserGrantError(400, "User-signed Grant timestamp is too far ahead");
     }
     if (payload.status === "revoked") {
       const current = await this.grants.findCurrentByGrantId(payload.grant_id);
       if (!current || current.localRole !== "grantor" || current.localAccountId !== grantor.id ||
         current.payload.grantor !== grantor.did ||
         payload.consent_context.grantee_address !== canonicalizeHailAddress(granteeAddressInput)) {
-        throw new Error("Authoritative Grant or reviewed sender does not match revocation");
+        throw new UserGrantError(409, "Authoritative Grant or reviewed sender does not match revocation");
       }
       if (Buffer.from(current.representation).equals(Buffer.from(representation))) return current;
       if (current.payload.status !== "active" || payload.updated_at <= current.payload.updated_at ||
         !isDeepStrictEqual(payload, { ...current.payload, status: "revoked",
           revision: current.payload.revision + 1, previous: Uint8Array.from(current.digest),
           updated_at: payload.updated_at, key_id: `${grantor.did}#hail-identity` })) {
-        throw new Error("User-signed Grant revocation conflicts with the current revision");
+        throw new UserGrantError(409, "User-signed Grant revocation conflicts with the current revision");
       }
       // Restriction needs retained consent only, never the sender's availability.
       try {
@@ -157,10 +163,10 @@ export class GrantService {
       return { ...signed, receivedAt: this.now() };
     }
     if (payload.revision !== 1 || payload.previous !== null || payload.updated_at !== payload.issued_at) {
-      throw new Error("User-signed initial Grant has invalid authority");
+      throw new UserGrantError(409, "User-signed initial Grant has invalid authority");
     }
     if (payload.expires_at !== null && payload.expires_at <= now) {
-      throw new Error("User-signed Grant is stale or expired");
+      throw new UserGrantError(400, "User-signed Grant is stale or expired");
     }
     const address = await this.addressVerifier.verify(canonicalizeHailAddress(granteeAddressInput));
     const profile = await this.profileVerifier.verify(address.did);
@@ -170,17 +176,18 @@ export class GrantService {
       profile.messagingDidKey !== address.messagingDidKey ||
       !Buffer.from(payload.consent_context.address_binding_hash.value).equals(Buffer.from(address.digest)) ||
       !Buffer.from(payload.consent_context.sender_profile_hash.value).equals(Buffer.from(profile.digest))) {
-      throw new Error("Grant consent no longer matches current verified grantee evidence");
+      throw new UserGrantError(400, "Grant consent no longer matches current verified grantee evidence");
     }
     if (payload.scope.length !== 1 ||
       !isDeepStrictEqual(payload.scope[0], normalizeScope(payload.scope[0]!))) {
-      throw new Error("User Grant scope is not canonical");
+      throw new UserGrantError(400, "User Grant scope is not canonical");
     }
-    validateScopeAgainstProfile(payload.scope[0]!, profile.profile);
+    try { validateScopeAgainstProfile(payload.scope[0]!, profile.profile); }
+    catch (error) { throw new UserGrantError(400, error instanceof Error ? error.message : "Invalid Grant scope"); }
     const existing = await this.grants.findActiveAuthoritativeByDidPair(grantor.did, address.did);
     if (existing) {
       if (Buffer.from(existing.representation).equals(Buffer.from(representation))) return existing;
-      throw new Error("An active different Grant already exists for these DIDs");
+      throw new UserGrantError(409, "An active different Grant already exists for these DIDs");
     }
     await this.grants.insertAuthoritativeRevision1({ revision: signed,
       consent: { address, senderProfile: profile }, destinationServiceBase: address.serviceBase });

@@ -14,6 +14,8 @@ import type {
   SignedGrantRevisionInput,
 } from "./store.js";
 
+export class GrantConflictError extends Error {}
+
 interface GrantRow {
   grant_id: string;
   local_account_id: string;
@@ -334,7 +336,7 @@ export class GrantRepository implements GrantStore {
           )
         RETURNING grant_id
       `;
-      if (updated.length !== 1) throw new Error("Authoritative Grant revision conflict");
+      if (updated.length !== 1) throw new GrantConflictError("Authoritative Grant revision conflict");
       await this.insertRevision(transaction, revision);
       const publications = await transaction`
         INSERT INTO grant_publications (grant_id, revision, destination_service_base)

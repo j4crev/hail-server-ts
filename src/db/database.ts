@@ -168,6 +168,11 @@ const migrations: readonly Migration[] = [
     name: "collocated-grant-receiver",
     url: new URL("../../migrations/0031_collocated_grant_receiver.sql", import.meta.url),
   },
+  {
+    version: 32,
+    name: "account-api-credentials",
+    url: new URL("../../migrations/0032_account_api_credentials.sql", import.meta.url),
+  },
 ];
 
 export class ProviderDatabase {

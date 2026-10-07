@@ -31,6 +31,10 @@ import { TransferRateLimit } from "./migration/rate-limit.js";
 import { TransferCancellationService } from "./migration/cancellation.js";
 import { TransferCancellationReceiver } from "./migration/cancellation-receiver.js";
 import { TransferCleanup } from "./migration/cleanup.js";
+import { AccountApiRepository } from "./accounts/repository.js";
+import { GrantService } from "./grants/service.js";
+import { AddressVerifier } from "./discovery/verifier.js";
+import { SenderProfileVerifier } from "./profiles/verifier.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -144,6 +148,11 @@ const app = createApp(config, schemaRehearsal ? {
   senderProfileStore: onboardingRepository,
   checkReadiness,
 } : {
+  accountApi: { accounts: new AccountApiRepository(database.sql), grants: grantRepository,
+    service: new GrantService(onboardingRepository, grantRepository, new KeyEncryptor(config.keyEncryptionKey),
+      resolver, new AddressVerifier(plc, transport.fetch, transport.validateTarget),
+      new SenderProfileVerifier(resolver, transport.fetch, transport.validateTarget, undefined, onboardingRepository),
+      config.hailServiceBase) },
   discoveryStore: onboardingRepository,
   senderProfileStore: onboardingRepository,
   grantReceiver: new GrantReceiver(

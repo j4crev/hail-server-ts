@@ -23,6 +23,10 @@ import type { TransferGrantSubmission } from "./migration/grant-submission.js";
 import type { TransferRateLimit } from "./migration/rate-limit.js";
 import type { TransferCancellationService } from "./migration/cancellation.js";
 import type { TransferCancellationReceiver } from "./migration/cancellation-receiver.js";
+import { registerAccountApiRoutes } from "./accounts/routes.js";
+import type { AccountApiRepository } from "./accounts/repository.js";
+import type { GrantRepository } from "./grants/repository.js";
+import type { GrantService } from "./grants/service.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -45,6 +49,7 @@ export interface AppDependencies {
   transferRateLimit?: TransferRateLimit;
   transferCancellation?: TransferCancellationService;
   transferCancellationReceiver?: TransferCancellationReceiver;
+  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService };
 }
 
 const defaultDependencies: AppDependencies = {
@@ -59,6 +64,11 @@ export function createApp(
 ): Hono {
   const app = new Hono();
   const protectedSchedule = new ProtectedResponseSchedule();
+
+  if (dependencies.accountApi) {
+    const { accounts, grants, service } = dependencies.accountApi;
+    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin);
+  }
 
   if (dependencies.discoveryStore) {
     registerDiscoveryRoutes(app, config.publicOrigin, dependencies.discoveryStore);

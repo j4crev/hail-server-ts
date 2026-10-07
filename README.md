@@ -23,6 +23,84 @@ but is not independent production monitoring.
 Original Alice/Bob identities are custodial; only fresh user-key-held POC DIDs
 use the portable ceremony. Public HTTPS activation is not public PLC registration.
 
+## hailp Account API
+
+Migration 32 adds the first authenticated account-management slice used by
+`hailp` in `hail-user-client-ts`. It is separate from federation and supports
+existing active accounts, account details, current signed Grant retrieval and
+user-signed Grant creation/revocation import. It reuses the existing Grant
+service and transactional publication outbox. This is local implementation
+work; the recorded deployed POC remains at migration 31 until a separate rollout.
+
+### Bootstrap credentials (provider operator)
+
+```bash
+bun run account:credential-create -- "$active_address" /secure/api.credential.json
+# Add --write-grants for signed Grant submission/revocation:
+bun run account:credential-create -- "$active_address" /secure/writer.credential.json --write-grants
+bun run account:credential-revoke -- "$credential_id"
+```
+
+The issuance command writes the secret only to a new mode-`0600` file and
+prints credential ID/account/scopes/expiry, not the token. Transfer the file
+privately to the owner for CLI use. The database stores SHA-256 of a random
+256-bit token; credentials have a fixed 30-day expiry and can be revoked.
+Default scopes are `account:read` and `grants:read`; the write option adds
+`grants:write`. No credential is issued for an inactive or fenced account.
+Authentication is checked against current credential/account state for each
+request; revocation prevents new authentication, rather than cancelling an
+already admitted in-flight request. Credentials are provider-local and are
+not exported in portable DID snapshots. Provision a fresh credential at the
+destination after transfer.
+
+### HTTP contract
+
+Use `Authorization: Bearer <token>` over the configured provider HTTPS origin.
+These paths are the reference provider's client API, not standardized Hail
+federation operations:
+
+| Operation | Scope | Result |
+| --- | --- | --- |
+| `GET /api/v1/account` | `account:read` | Own account/DID/address, custody classification, public identity/recovery metadata, migration state and scopes |
+| `GET /api/v1/account/grants/{grant_id}` | `grants:read` | Own authoritative or received Grant, local role, exact base64url COSE bytes, digest and ETag; the CLI renders diagnostic JSON locally |
+| `PUT /api/v1/account/grants/{grant_id}` | `grants:write` | Verify/store an initial or terminal user-signed Grant; JSON acknowledgement of revision/status/digest and durable publication responsibility |
+
+PUT uses `application/cose; cose-type="cose-sign1"`, no content coding, and a
+256 KiB body limit. The signature/predecessor supplies update authority; this
+account endpoint does not reuse the peer receiver's HTTP precondition contract.
+Successful PUT returns `200` only after persistence. `publication: "durable"`
+does not imply sender acknowledgement; exact retries do not create a new job.
+Other accounts' Grant IDs return `404`; insufficient scope `403`; missing,
+expired, revoked or inactive-account credentials `401`. Invalid signed input
+returns `400`, state/fence/revision conflicts `409`, transport violations
+`413`/`415`, and temporary dependency/storage failure `503`.
+
+Responses use `Cache-Control: no-store` and `Vary: Authorization`; private keys,
+credential values and hashes are never included. Custody classification is
+reported from existing stored evidence/key roles, not proof of physical key
+custody or an implementation of the planned managed profile. Fenced reads
+can show retained history; writes remain blocked. The first process-wide
+limit is 120 account API requests per minute, returning `429`/`Retry-After`;
+distributed limits and production load calibration remain future hardening.
+
+### Verification
+
+The opt-in test exercises actual `hailp` processes against a local TLS Hono
+server using a temporary CA trusted through `NODE_EXTRA_CA_CERTS` (never
+disabled certificate verification). It requires OpenSSL and a disposable
+PostgreSQL database:
+
+```bash
+DATABASE_URL=postgresql://hail:password@127.0.0.1:5432/hail_api_test \
+  bun --bun vitest run test/account-api.integration.test.ts
+```
+
+It covers credential bootstrap/hashing, signed import, account/scope isolation,
+collocated read-only ownership, invalid signatures, resource bounds, fences,
+lost-response revocation retry, expired/revoked credentials and rejection of
+redirects/insecure credential files. The user signer and vault remain outside
+the provider; no user identity private key is stored there.
+
 ## API-first account management direction
 
 The selected product architecture is an authenticated account API used by
@@ -33,9 +111,9 @@ managed profile lets the provider sign authorized identity operations while
 the account owner retains the top PLC recovery key. Both profiles are intended
 for people and agents.
 
-The current POC has federation/transfer HTTP routes and operator CLI building
-blocks, not the full authenticated management API or that preferred managed
-onboarding profile. Implement the account boundary over existing services and
+The current implementation has the authenticated account/Grant slice above,
+federation/transfer routes and operator CLI building blocks, not the full
+management API or the preferred managed onboarding profile. Extend the account boundary over existing services and
 transactions rather than treating administrator CLIs as client APIs. The
 [API and custody plan](https://github.com/j4crev/hailproto/blob/main/docs/production-portable-custody.md#api-first-provider-and-cli-clients)
 defines the first authenticated slice, profile-specific signing, isolation,

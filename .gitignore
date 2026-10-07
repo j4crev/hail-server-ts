@@ -9,6 +9,7 @@ coverage/
 *.pkcs8
 *.pem
 *.key
+*.credential.json
 *.migration-export.json
 *.migration-consent.json
 *.migration-plc-operation.json
