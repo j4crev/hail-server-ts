@@ -192,6 +192,35 @@ function uuidTimestamp(uuid: string): number {
 }
 
 describe("GrantService", () => {
+  it("imports user-signed terminal revocation without provider custody or sender discovery", async () => {
+    const context = fixture();
+    const initial = await context.service.prepareUserSignedGrant(account.canonicalAddress,
+      context.address.address, definition);
+    const key = await crypto.subtle.importKey("pkcs8", Uint8Array.from(identityPkcs8), "Ed25519", false, ["sign"]);
+    const sign = (payload: HailGrant) => signPayload("hail.grant", payload,
+      createWebCryptoSigner(`${grantorDid}#hail-identity`, key));
+    const stored = await context.service.acceptUserSignedGrant(account.canonicalAddress,
+      context.address.address, await sign(initial));
+    context.addressVerifier.verify.mockClear().mockRejectedValue(new Error("Sender address offline"));
+    context.profileVerifier.verify.mockClear().mockRejectedValue(new Error("Sender profile offline"));
+    const payload: HailGrant = { ...stored.payload, status: "revoked", revision: 2,
+      previous: stored.digest, updated_at: stored.payload.updated_at + 1 };
+    const representation = await sign(payload);
+    const revoked = await context.service.acceptUserSignedGrant(account.canonicalAddress,
+      context.address.address, representation);
+    expect(revoked.payload).toEqual(payload);
+    expect(await context.service.acceptUserSignedGrant(account.canonicalAddress,
+      context.address.address, representation)).toEqual(revoked);
+    expect(context.appendAuthoritativeRevocation).toHaveBeenCalledOnce();
+    expect(context.accounts.getKey).not.toHaveBeenCalled();
+    expect(context.decrypt).not.toHaveBeenCalled();
+    expect(context.addressVerifier.verify).not.toHaveBeenCalled();
+    expect(context.profileVerifier.verify).not.toHaveBeenCalled();
+    await expect(context.service.acceptUserSignedGrant(account.canonicalAddress,
+      context.address.address, await sign({ ...payload, updated_at: payload.updated_at + 1 })))
+      .rejects.toThrow("conflict");
+  });
+
   it("imports only an exact user-key-signed Grant against current address and profile evidence", async () => {
     const context = fixture();
     const proposed = await context.service.prepareUserSignedGrant(account.canonicalAddress,

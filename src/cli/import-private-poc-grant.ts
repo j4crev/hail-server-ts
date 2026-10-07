@@ -44,7 +44,7 @@ try {
     new SenderProfileVerifier(resolver, transport.fetch, transport.validateTarget, undefined, accounts),
     config.hailServiceBase).acceptUserSignedGrant(grantorAddress, granteeAddress, signed);
   console.info(JSON.stringify({ grantId: grant.payload.grant_id,
-    revision: grant.payload.revision, grantor: grant.payload.grantor,
+    revision: grant.payload.revision, status: grant.payload.status, grantor: grant.payload.grantor,
     grantee: grant.payload.grantee,
     digest: encodeBase64Url(createHash("sha256").update(signed).digest()),
     state: "signed-authoritative-pending-publication" }));

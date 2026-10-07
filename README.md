@@ -23,6 +23,24 @@ but is not independent production monitoring.
 Original Alice/Bob identities are custodial; only fresh user-key-held POC DIDs
 use the portable ceremony. Public HTTPS activation is not public PLC registration.
 
+## API-first account management direction
+
+The selected product architecture is an authenticated account API used by
+human apps, agents and provider-native/Hail-provided CLI clients. Normal users
+and agents should not need SSH, database credentials or administrator CLI
+access. Owner-controlled accounts submit identity-signed objects; the approved
+managed profile lets the provider sign authorized identity operations while
+the account owner retains the top PLC recovery key. Both profiles are intended
+for people and agents.
+
+The current POC has federation/transfer HTTP routes and operator CLI building
+blocks, not the full authenticated management API or that preferred managed
+onboarding profile. Implement the account boundary over existing services and
+transactions rather than treating administrator CLIs as client APIs. The
+[API and custody plan](https://github.com/j4crev/hailproto/blob/main/docs/production-portable-custody.md#api-first-provider-and-cli-clients)
+defines the first authenticated slice, profile-specific signing, isolation,
+renewal and managed-migration acceptance conditions.
+
 ## Development
 
 Build the sibling codec first, install dependencies, and create local
@@ -367,3 +385,22 @@ after a fault; never release an exported fence or re-sign a submitted PLC
 operation merely to get past a failure. Returning to a former provider with a
 retained retired account and coordinated post-export rollback remain separate
 work. See the linked recovery guide and deployment log for the verified proof.
+
+For user-held Grant revocation, the client signs a terminal successor of the
+exact current Grant; the provider uses the same signed-Grant import command:
+
+```text
+client: poc:revoke-grant -- <user-vault> <current-grant.cose> <reviewed-grant-id> <reviewed-sender-address> <new-revocation.cose>
+current-provider: poc:grant-import -- <user-address> <reviewed-sender-address> <revocation.cose>
+```
+
+The provider checks the current user identity signature, local ownership,
+exact predecessor, timestamps and preserved fields, then commits the terminal
+revision and publication outbox entry atomically. It never retrieves a
+provider-held user identity key, and it does not require sender/profile
+availability or an unexpired Grant. Exact retries converge without another
+revision or job. Existing fences and collocated grantor/grantee roles continue
+to apply. `grant:revoke` remains the custodial authoring command; user-held
+accounts use signed import. See the client README for its reference-vault
+limitation: routine unlocking currently also loads the PLC recovery key and
+needs an identity-only path before production.

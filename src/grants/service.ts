@@ -115,17 +115,51 @@ export class GrantService {
     const resolved = await this.resolver.resolve(grantor.did);
     if (resolved.serviceBase !== this.expectedServiceBase) throw new Error("Grantor provider is no longer current");
     const payload = inspectSignedPayload("hail.grant", representation).payload;
-    if (payload.grantor !== grantor.did || payload.key_id !== `${grantor.did}#hail-identity` ||
-      payload.revision !== 1 || payload.previous !== null || payload.status !== "active" ||
-      payload.updated_at !== payload.issued_at) throw new Error("User-signed initial Grant has invalid authority");
+    if (payload.grantor !== grantor.did || payload.key_id !== `${grantor.did}#hail-identity`) {
+      throw new Error("User-signed Grant has invalid authority");
+    }
     await verifySignedPayload("hail.grant", representation,
       createWebCryptoVerifier(async (kid) => {
         if (kid !== `${grantor.did}#hail-identity`) throw new Error("Unexpected Grant identity signer");
         return ed25519PublicKeyFromDidKey(resolved.identityDidKey);
       }));
     const now = Math.floor(this.now().getTime() / 1000);
-    if (payload.issued_at > now + 300 ||
-      (payload.expires_at !== null && payload.expires_at <= now)) {
+    const signed: SignedGrantRevisionInput = { localAccountId: grantor.id, localRole: "grantor",
+      payload, representation, digest: new Uint8Array(createHash("sha256").update(representation).digest()),
+      signingPublicKey: resolved.identityDidKey, signingPlcEvidence: resolved.evidence };
+    if (payload.issued_at > now + 300 || payload.updated_at > now + 300) {
+      throw new Error("User-signed Grant timestamp is too far ahead");
+    }
+    if (payload.status === "revoked") {
+      const current = await this.grants.findCurrentByGrantId(payload.grant_id);
+      if (!current || current.localRole !== "grantor" || current.localAccountId !== grantor.id ||
+        current.payload.grantor !== grantor.did ||
+        payload.consent_context.grantee_address !== canonicalizeHailAddress(granteeAddressInput)) {
+        throw new Error("Authoritative Grant or reviewed sender does not match revocation");
+      }
+      if (Buffer.from(current.representation).equals(Buffer.from(representation))) return current;
+      if (current.payload.status !== "active" || payload.updated_at <= current.payload.updated_at ||
+        !isDeepStrictEqual(payload, { ...current.payload, status: "revoked",
+          revision: current.payload.revision + 1, previous: Uint8Array.from(current.digest),
+          updated_at: payload.updated_at, key_id: `${grantor.did}#hail-identity` })) {
+        throw new Error("User-signed Grant revocation conflicts with the current revision");
+      }
+      // Restriction needs retained consent only, never the sender's availability.
+      try {
+        await this.grants.appendAuthoritativeRevocation({ revision: signed,
+          expectedCurrentRevision: current.payload.revision, expectedCurrentDigest: current.digest });
+      } catch (error) {
+        const winner = await this.grants.findCurrentByGrantId(payload.grant_id);
+        if (winner?.localRole === "grantor" && winner.localAccountId === grantor.id &&
+          Buffer.from(winner.representation).equals(Buffer.from(representation))) return winner;
+        throw error;
+      }
+      return { ...signed, receivedAt: this.now() };
+    }
+    if (payload.revision !== 1 || payload.previous !== null || payload.updated_at !== payload.issued_at) {
+      throw new Error("User-signed initial Grant has invalid authority");
+    }
+    if (payload.expires_at !== null && payload.expires_at <= now) {
       throw new Error("User-signed Grant is stale or expired");
     }
     const address = await this.addressVerifier.verify(canonicalizeHailAddress(granteeAddressInput));
@@ -148,9 +182,6 @@ export class GrantService {
       if (Buffer.from(existing.representation).equals(Buffer.from(representation))) return existing;
       throw new Error("An active different Grant already exists for these DIDs");
     }
-    const signed: SignedGrantRevisionInput = { localAccountId: grantor.id, localRole: "grantor",
-      payload, representation, digest: new Uint8Array(createHash("sha256").update(representation).digest()),
-      signingPublicKey: resolved.identityDidKey, signingPlcEvidence: resolved.evidence };
     await this.grants.insertAuthoritativeRevision1({ revision: signed,
       consent: { address, senderProfile: profile }, destinationServiceBase: address.serviceBase });
     return { ...signed, receivedAt: this.now() };
