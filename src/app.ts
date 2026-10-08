@@ -27,6 +27,8 @@ import { registerAccountApiRoutes } from "./accounts/routes.js";
 import type { AccountApiRepository } from "./accounts/repository.js";
 import type { GrantRepository } from "./grants/repository.js";
 import type { GrantService } from "./grants/service.js";
+import { registerSelfServiceOnboarding, type SelfServiceOnboarding } from "./accounts/onboarding-routes.js";
+import type { AccountMessaging } from "./accounts/messaging.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -49,7 +51,8 @@ export interface AppDependencies {
   transferRateLimit?: TransferRateLimit;
   transferCancellation?: TransferCancellationService;
   transferCancellationReceiver?: TransferCancellationReceiver;
-  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService };
+  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging };
+  selfServiceOnboarding?: SelfServiceOnboarding;
 }
 
 const defaultDependencies: AppDependencies = {
@@ -64,10 +67,11 @@ export function createApp(
 ): Hono {
   const app = new Hono();
   const protectedSchedule = new ProtectedResponseSchedule();
+  if(dependencies.selfServiceOnboarding)registerSelfServiceOnboarding(app,dependencies.selfServiceOnboarding);
 
   if (dependencies.accountApi) {
-    const { accounts, grants, service } = dependencies.accountApi;
-    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin);
+    const { accounts, grants, service, messaging } = dependencies.accountApi;
+    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging);
   }
 
   if (dependencies.discoveryStore) {

@@ -136,6 +136,9 @@ export class GrantService {
     if (payload.issued_at > now + 300 || payload.updated_at > now + 300) {
       throw new UserGrantError(400, "User-signed Grant timestamp is too far ahead");
     }
+    const retained = await this.grants.findCurrentByGrantId(payload.grant_id);
+    if (retained?.localRole === "grantor" && retained.localAccountId === grantor.id &&
+      Buffer.from(retained.representation).equals(Buffer.from(representation))) return retained;
     if (payload.status === "revoked") {
       const current = await this.grants.findCurrentByGrantId(payload.grant_id);
       if (!current || current.localRole !== "grantor" || current.localAccountId !== grantor.id ||
@@ -165,6 +168,7 @@ export class GrantService {
     if (payload.revision !== 1 || payload.previous !== null || payload.updated_at !== payload.issued_at) {
       throw new UserGrantError(409, "User-signed initial Grant has invalid authority");
     }
+    if(retained)throw new UserGrantError(409,"Grant ID is already retained with another signed state");
     if (payload.expires_at !== null && payload.expires_at <= now) {
       throw new UserGrantError(400, "User-signed Grant is stale or expired");
     }

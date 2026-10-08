@@ -173,6 +173,7 @@ const migrations: readonly Migration[] = [
     name: "account-api-credentials",
     url: new URL("../../migrations/0032_account_api_credentials.sql", import.meta.url),
   },
+  { version: 33, name: "self-service-accounts", url: new URL("../../migrations/0033_self_service_accounts.sql",import.meta.url) },
 ];
 
 export class ProviderDatabase {

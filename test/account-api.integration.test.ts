@@ -15,10 +15,19 @@ import { ProviderDatabase } from "../src/db/database.js";
 import type { VerifiedAddress } from "../src/discovery/verifier.js";
 import { GrantRepository } from "../src/grants/repository.js";
 import { GrantService } from "../src/grants/service.js";
-import type { KeyEncryptor } from "../src/identity/key-encryption.js";
 import { OnboardingRepository } from "../src/onboarding/repository.js";
 import type { HailDidResolver } from "../src/plc/resolver.js";
 import type { VerifiedSenderProfile } from "../src/profiles/store.js";
+import {AccountMessaging} from "../src/accounts/messaging.js";
+import {BodyRepository} from "../src/bodies/repository.js";
+import {EnvelopeRepository} from "../src/envelopes/repository.js";
+import {EnvelopeService} from "../src/envelopes/service.js";
+import {EnvelopeReceiver} from "../src/envelopes/receiver.js";
+import {DeliveryRepository} from "../src/delivery/repository.js";
+import {DeliveryWorker} from "../src/delivery/worker.js";
+import {KeyEncryptor} from "../src/identity/key-encryption.js";
+import {inspectSignedPayload} from "@hailproto/codec";
+import {ALL_ACCOUNT_SCOPES} from "../src/accounts/repository.js";
 
 const integration = process.env.DATABASE_URL ? describe : describe.skip;
 const freshDid = () => `did:plc:${Array.from(randomBytes(24), b => "abcdefghijklmnopqrstuvwxyz234567"[b % 32]).join("")}`;
@@ -47,6 +56,10 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
   let redirect = false;
   let losePutResponse = false;
   let redirectedRequests = 0;
+  let messageResolver:HailDidResolver;
+  const messageEncryptor=new KeyEncryptor(encodeBase64Url(randomBytes(32)));
+  const messages: string[]=[];
+  let messageError:unknown;
   const ownerId = randomUUID();
   const otherId = randomUUID();
   const senderId = randomUUID();
@@ -143,12 +156,31 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
       { async decrypt() { throw new Error("Provider must never decrypt user keys"); } } as unknown as KeyEncryptor,
       resolver, { async verify() { if (!senderAvailable) throw new Error("Sender offline"); return verifiedAddress; } },
       { async verify() { if (!senderAvailable) throw new Error("Sender offline"); return verifiedProfile; } }, `${origin}/hail`);
+    messageResolver={async resolve(value){if(value!==did&&value!==senderDid)throw new Error("Unknown message party");
+      const key=await new OnboardingRepository(db.sql).getKey(value===did?ownerId:senderId,"hail-messaging");
+      return {did:value,messagingDidKey:key.publicKey,identityDidKey:value===did?vault.vault.identity.publicDidKey:senderIdentityKey,serviceBase:`${origin}/hail`,evidence};}};
+    const envelopes=new EnvelopeRepository(db.sql),onboarding=new OnboardingRepository(db.sql);
+    const messaging=new AccountMessaging(db.sql,new BodyRepository(db.sql),envelopes,
+      new EnvelopeService(onboarding,grants,envelopes,messageEncryptor,messageResolver,`${origin}/hail`),async(sender,id)=>{
+        const bytes=await envelopes.sent(sender,id);const envelope=inspectSignedPayload("hail.envelope",bytes!).payload;
+        const receiver=new EnvelopeReceiver(onboarding,envelopes,messageResolver,`${origin}/hail`);
+        const outcome=await receiver.receive(bytes!);if(!["accepted","duplicate"].includes(outcome))throw new Error(`Not accepted: ${outcome}`);
+        if(!messages.includes(id))messages.push(id);
+        await db.sql`UPDATE delivery_work work SET next_attempt_at=now()+interval '1 day'
+          WHERE message_id<>${id} AND state IN ('accepted','on-hold') AND NOT EXISTS (
+            SELECT 1 FROM received_envelopes envelope JOIN provider_migration_fences fence ON fence.account_id=envelope.local_account_id
+            WHERE envelope.sender_did=work.sender_did AND envelope.message_id=work.message_id)`;
+        const body=await db.sql<{body_bytes:Uint8Array}[]>`SELECT body_bytes FROM detached_bodies WHERE sender_account_id=${sender===did?ownerId:senderId} AND digest=${envelope.body.digest.value}`;
+        await new DeliveryWorker(new DeliveryRepository(db.sql),{async retrieve(){return {kind:"success",bytes:new Uint8Array(body[0]!.body_bytes)};}}).processOne();
+        return {messageId:id,state:"delivered"};});
+    const send=messaging.send.bind(messaging);
+    messaging.send=async(...args)=>{try{return await send(...args);}catch(error){messageError=error;throw error;}};
     const proposed = await service.prepareUserSignedGrant(address, senderAddress,
       { scope: { type: "categories", values: ["updates"] }, expiresAt: now + 86400 });
     grantId = proposed.grant_id;
     signedGrant = await user.signGrant(proposed);
     app = createApp({ publicOrigin: origin, hailServiceBase: `${origin}/hail`, providerId: "test" } as AppConfig,
-      { accountApi: { accounts, grants, service }, async checkReadiness() { return { ready: true }; } });
+      { accountApi: { accounts, grants, service,messaging }, async checkReadiness() { return { ready: true }; } });
     await json("vault.json", vault.vault);
     await writeFile(join(directory, "initial.cose"), signedGrant, { mode: 0o600 });
     const bootstrap = Bun.spawn(["bun", "src/cli/create-account-credential.ts", address,
@@ -167,6 +199,13 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
     server?.stop(true);
     receiver?.stop(true);
     if (db) {
+      for(const table of ["sent_delivery_status","delivery_status_wrappers","delivery_status_payloads","terminal_status_publications","delivered_messages","verified_body_provenance","delivery_work","reply_capabilities","received_envelopes","sent_envelopes","body_authorizations","detached_bodies"]){
+        if(table==="received_envelopes") {
+          await db.sql`DELETE FROM received_envelopes WHERE sender_did IN (${did},${senderDid}) AND authorization_type='reply'`;
+          await db.sql`DELETE FROM sent_envelopes WHERE sender_did IN (${did},${senderDid}) AND authorization_type='reply'`;
+        }
+        const column=table==="reply_capabilities"?"original_sender_did":table==="verified_body_provenance"?"sender_did":table==="body_authorizations"||table==="detached_bodies"?"sender_account_id":"sender_did";
+        await db.sql.unsafe(`DELETE FROM ${table} WHERE ${column} IN ($1,$2)`,column==="sender_account_id"?[ownerId,senderId]:[did,senderDid]);}
       await db.sql`DELETE FROM provider_migration_fences WHERE account_id IN (${ownerId},${otherId},${senderId})`;
       await db.sql`DELETE FROM account_api_credentials WHERE account_id IN (${ownerId},${otherId},${senderId})`;
       if (grantId) {
@@ -177,6 +216,7 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
         await db.sql`DELETE FROM grant_lineages WHERE grant_id = ${grantId}`;
       }
       await db.sql`DELETE FROM portable_custody_evidence WHERE account_id = ${ownerId}`;
+      await db.sql`DELETE FROM account_keys WHERE account_id IN (${ownerId},${senderId})`;
       await db.sql`DELETE FROM provider_accounts WHERE id IN (${ownerId},${otherId},${senderId})`;
       await db.close();
     }
@@ -193,9 +233,18 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
     if (result.exit) throw new Error(result.stderr);
     expect(JSON.parse(result.stdout)).toMatchObject({ accountId: ownerId, did, custodyProfile: "owner-controlled",
       monitorVerificationMode: "poc-local", identityPublicKey: vault.vault.identity.publicDidKey });
-    const imported = await cli(["grant", "submit", join(directory, "initial.cose")]);
+    const imported = await cli(["grant", "create", senderAddress, "--category", "updates", "--vault",
+      join(directory,"vault.json"),"--output",join(directory,"created.cose")],"owner.credential.json",true);
     if (imported.exit) throw new Error(imported.stderr);
+    grantId = JSON.parse(imported.stdout).grantId;
+    signedGrant = new Uint8Array(await readFile(join(directory,"created.cose")));
+    await writeFile(join(directory,"initial.cose"),signedGrant);
     expect(JSON.parse(imported.stdout)).toMatchObject({ grantId, revision: 1, status: "active" });
+    const retried = await cli(["grant", "create", senderAddress, "--category", "updates", "--vault",
+      join(directory,"vault.json"),"--output",join(directory,"created.cose")],"owner.credential.json",true);
+    expect(retried.exit).toBe(0);
+    expect(JSON.parse(retried.stdout).grantId).toBe(grantId);
+    expect(JSON.parse((await cli(["grant","list"])).stdout).grants).toHaveLength(1);
     expect((await cli(["grant", "submit", join(directory, "initial.cose")])).exit).toBe(0);
     const shown = await cli(["grant", "show", grantId, "--output", join(directory, "copy.cose")]);
     if (shown.exit) throw new Error(shown.stderr);
@@ -236,6 +285,38 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
     expect((await grants.findCurrentByGrantId(grantId))?.payload.status).toBe("active");
   });
 
+  it("sends, reads inbox and replies through real CLI with durable message IDs and scoped ownership",async()=>{
+    for(const id of [ownerId,senderId]){
+      const key=await crypto.subtle.generateKey("Ed25519",true,["sign","verify"]) as CryptoKeyPair;
+      const publicKey=await didKey(key.publicKey),raw=new Uint8Array(await crypto.subtle.exportKey("pkcs8",key.privateKey));
+      const encrypted=await messageEncryptor.encrypt(id,"hail-messaging","ed25519",publicKey,raw);raw.fill(0);
+      await db.sql`INSERT INTO account_keys (account_id,role,algorithm,public_key,encrypted_private_key,encryption_nonce,encryption_version,kek_id)
+        VALUES (${id},'hail-messaging','ed25519',${publicKey},${encrypted.ciphertext},${encrypted.nonce},1,'poc-v1')`;}
+    await json("message-sender.credential.json",credentialRecord(await accounts.issue(senderAddress,false,undefined,[...ALL_ACCOUNT_SCOPES])));
+    await json("message-owner.credential.json",credentialRecord(await accounts.issue(address,false,undefined,[...ALL_ACCOUNT_SCOPES])));
+    const rotatedPath=join(directory,"self-service.credential.json");
+    const rotated=await cli(["credential","create","--output",rotatedPath],"message-owner.credential.json");if(rotated.exit)throw new Error(rotated.stderr);
+    const rotatedId=JSON.parse(rotated.stdout).credentialId;
+    expect((await cli(["credential","create","--output",rotatedPath],"message-owner.credential.json")).exit).toBe(0);
+    expect((await cli(["credential","revoke",rotatedId],"message-owner.credential.json")).exit).toBe(0);
+    expect((await cli(["account","show"],"self-service.credential.json")).exit).toBe(1);
+    await writeFile(join(directory,"text.txt"),"CLI message");
+    const args=["send","--grant",grantId,"--category","updates","--file",join(directory,"text.txt"),"--state",join(directory,"message-state.json"),"--reply-until",String(Math.floor(Date.now()/1000)+86400)];
+    const sent=await cli(args,"message-sender.credential.json");if(sent.exit)throw new Error(`${sent.stderr} ${String(messageError)}`);
+    const id=JSON.parse(sent.stdout).messageId;
+    const retry=await cli(args,"message-sender.credential.json");expect(retry.exit).toBe(0);expect(JSON.parse(retry.stdout).messageId).toBe(id);
+    const inbox=await cli(["inbox","list"],"message-owner.credential.json");expect(inbox.exit).toBe(0);expect(JSON.parse(inbox.stdout).messages).toHaveLength(1);
+    const read=await cli(["inbox","show",senderDid,id],"message-owner.credential.json");if(read.exit)throw new Error(read.stderr);
+    expect(JSON.parse(read.stdout).body.blocks[0].children[0].text).toBe("CLI message");
+    expect(JSON.parse(read.stdout).reply.allowed).toBe(true);
+    expect((await cli(["inbox","show",senderDid,id],"message-sender.credential.json")).exit).toBe(1);
+    const reply=await cli(["reply",id,"--file",join(directory,"text.txt"),"--state",join(directory,"reply-state.json")],"message-owner.credential.json");if(reply.exit)throw new Error(reply.stderr);
+    expect((await cli(["inbox","list"],"message-sender.credential.json")).exit).toBe(0);
+    await writeFile(join(directory,"text.txt"),"changed");
+    expect((await cli(args,"message-sender.credential.json")).exit).toBe(1);
+    expect(await db.sql`SELECT message_id FROM delivered_messages WHERE sender_did=${senderDid} AND message_id=${id}`).toHaveLength(1);
+  });
+
   it("rejects fenced writes and recovers a committed revocation after a lost response without user keys at the provider", async () => {
     senderAvailable = false;
     const revoked = await signGrantRevocation(join(directory, "vault.json"), signedGrant, grantId,
@@ -261,7 +342,7 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
     expect(await db.sql`SELECT revision FROM grant_revisions WHERE grant_id=${grantId}`).toHaveLength(2);
     expect(await db.sql`SELECT revision FROM grant_publications WHERE grant_id=${grantId}`).toHaveLength(2);
     expect((await grants.findReceivedForSender(grantId, senderDid))?.payload.status).toBe("revoked");
-    expect(await db.sql`SELECT role FROM account_keys WHERE account_id=${ownerId}`).toHaveLength(0);
+    expect(await db.sql`SELECT role FROM account_keys WHERE account_id=${ownerId} AND role='hail-identity'`).toHaveLength(0);
   });
 
   it("bounds transport and authenticates before revealing account or Grant validation", async () => {

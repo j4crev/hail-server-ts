@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { cidForCbor } from "@atproto/common";
 import { assureValidSig, def, didForCreateOp, validateOperationLog, type Operation } from "@did-plc/lib";
-import { createWebCryptoVerifier, verifySignedPayload } from "@hailproto/codec";
+import { createWebCryptoVerifier, createWebCryptoSigner, signPayload, verifySignedPayload } from "@hailproto/codec";
 import * as dagCbor from "@ipld/dag-cbor";
 import { base58btc } from "multiformats/bases/base58";
 import type { SQL } from "bun";
@@ -10,7 +10,7 @@ import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { canonicalizeHailAddress } from "../identity/address.js";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
-import { generateAccountKeys } from "../identity/keys.js";
+import { generateAccountKeys, importEd25519PrivateKey } from "../identity/keys.js";
 import type { PlcDirectoryClient } from "../plc/client.js";
 import { isPlcNotFound } from "../plc/client.js";
 import { verifyRegisteredGenesis } from "../plc/verify.js";
@@ -22,12 +22,15 @@ export interface PrivatePocPreparation {
   userRecoveryKey: string; userIdentityKey: string;
   providerRotationKey: string; providerMessagingKey: string;
   sourceServiceBase: string;
+  custodyProfile: "owner-controlled" | "managed";
 }
 
 interface PreparationRow {
   account_id: string; user_recovery_public_key: string; user_identity_public_key: string;
   provider_rotation_public_key: string; provider_messaging_public_key: string;
   monitor_public_key: string;
+  custody_profile: "owner-controlled" | "managed";
+  signup_token_hash: Uint8Array | null;
 }
 
 export class PrivatePocOnboarding {
@@ -38,7 +41,8 @@ export class PrivatePocOnboarding {
   }
 
   async prepare(addressInput: string, recovery: string, identity: string,
-    backupChecked: boolean): Promise<PrivatePocPreparation> {
+    backupChecked: boolean, profile: "owner-controlled" | "managed" = "owner-controlled",
+    signupHash?: Uint8Array): Promise<PrivatePocPreparation> {
     if (!backupChecked || !recovery.startsWith("did:key:z") || !identity.startsWith("did:key:z") ||
       recovery === identity) {
       throw new Error("POC onboarding needs a verified user backup and distinct recovery/identity public keys");
@@ -50,25 +54,27 @@ export class PrivatePocOnboarding {
     }
     const prior = await this.sql<(PreparationRow & { canonical_address: string;
       onboarding_state: string })[]>`
-      SELECT p.account_id, p.user_recovery_public_key, p.user_identity_public_key,
+      SELECT p.account_id, p.user_recovery_public_key, p.user_identity_public_key,p.custody_profile,p.signup_token_hash,
         p.provider_rotation_public_key, p.provider_messaging_public_key, p.monitor_public_key,
         account.canonical_address, account.onboarding_state
       FROM provider_accounts account JOIN private_poc_onboarding_preparations p
         ON p.account_id = account.id WHERE account.canonical_address = ${address}`;
     if (prior[0]) {
-      if (prior[0].user_recovery_public_key !== recovery ||
-        prior[0].user_identity_public_key !== identity ||
+      if (prior[0].user_recovery_public_key !== recovery || prior[0].custody_profile !== profile ||
+        (profile === "owner-controlled" && prior[0].user_identity_public_key !== identity) ||
+        (signupHash && (!prior[0].signup_token_hash || !Buffer.from(signupHash).equals(Buffer.from(prior[0].signup_token_hash)))) ||
         !["reserved", "prepared", "submission-unknown", "did-registered", "address-staged"].includes(
-          prior[0].onboarding_state)) {
+          prior[0].onboarding_state) && !(signupHash && prior[0].onboarding_state === "active")) {
         throw new Error("This POC address is prepared for a different user or no longer pending");
       }
       return { accountId: prior[0].account_id, address,
-        userRecoveryKey: recovery, userIdentityKey: identity,
+        userRecoveryKey: recovery, userIdentityKey: prior[0].user_identity_public_key, custodyProfile: profile,
         providerRotationKey: prior[0].provider_rotation_public_key,
         providerMessagingKey: prior[0].provider_messaging_public_key, sourceServiceBase: this.serviceBase };
     }
     const accountId = randomUUID();
     const generated = await generateAccountKeys(accountId, this.encryptor);
+    if (profile === "managed") identity = generated.identityDidKey;
     const pair = await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]) as CryptoKeyPair;
     const monitorBytes = new Uint8Array(34);
     monitorBytes.set([0xed, 0x01]);
@@ -82,7 +88,7 @@ export class PrivatePocOnboarding {
         VALUES (${accountId}, ${randomUUID()}, ${address}, 'reserved')
         ON CONFLICT (canonical_address) DO NOTHING RETURNING id`;
       if (created.length !== 1) throw new Error("POC address is already reserved");
-      for (const key of generated.keys.filter((entry) => entry.role !== "hail-identity")) {
+      for (const key of generated.keys.filter((entry) => profile === "managed" || entry.role !== "hail-identity")) {
         await tx`INSERT INTO account_keys
           (account_id, role, algorithm, public_key, encrypted_private_key,
            encryption_nonce, encryption_version, kek_id)
@@ -92,23 +98,23 @@ export class PrivatePocOnboarding {
       await tx`INSERT INTO private_poc_onboarding_preparations
         (account_id, user_recovery_public_key, user_identity_public_key,
          provider_rotation_public_key, provider_messaging_public_key,
-         monitor_public_key, backup_checked_at)
+          monitor_public_key, backup_checked_at,custody_profile,signup_token_hash)
         VALUES (${accountId}, ${recovery}, ${identity}, ${generated.rotationDidKey},
-          ${generated.messagingDidKey}, ${monitorPublicKey}, clock_timestamp())`;
+          ${generated.messagingDidKey}, ${monitorPublicKey}, clock_timestamp(),${profile},${signupHash ?? null})`;
     });
-    return { accountId, address, userRecoveryKey: recovery, userIdentityKey: identity,
+    return { accountId, address, userRecoveryKey: recovery, userIdentityKey: identity, custodyProfile: profile,
       providerRotationKey: generated.rotationDidKey,
       providerMessagingKey: generated.messagingDidKey, sourceServiceBase: this.serviceBase };
   }
 
   async register(accountId: string, operationBytes: Uint8Array,
-    bindingCose: Uint8Array): Promise<{ did: string; state: string }> {
+     bindingCose: Uint8Array): Promise<{ did: string; state: string }> {
     if (operationBytes.length < 1 || operationBytes.length > 16_000 ||
-      bindingCose.length < 1 || bindingCose.length > 16_384) {
+      bindingCose.length > 16_384) {
       throw new Error("Signed POC onboarding evidence exceeds its limit");
     }
     const rows = await this.sql<PreparationRow[]>`
-      SELECT account_id, user_recovery_public_key, user_identity_public_key,
+      SELECT account_id, user_recovery_public_key, user_identity_public_key,custody_profile,signup_token_hash,
         provider_rotation_public_key, provider_messaging_public_key, monitor_public_key
       FROM private_poc_onboarding_preparations WHERE account_id = ${accountId}`;
     const prepared = rows[0];
@@ -140,6 +146,25 @@ export class PrivatePocOnboarding {
       throw new Error("User-signed POC genesis has invalid PLC state");
     }
     const keyId = `${did}#hail-identity`;
+    if (prepared.custody_profile === "managed") {
+      const cached = await this.sql<{ initial_binding_cose: Uint8Array | null }[]>`
+        SELECT initial_binding_cose FROM private_poc_onboarding_preparations WHERE account_id=${accountId}`;
+      if (!cached[0]?.initial_binding_cose) {
+        const key = await repository.getKey(accountId,"hail-identity");
+        const secret = await this.encryptor.decrypt(accountId,key.role,key.algorithm,key.publicKey,key);
+        let signed: Uint8Array;
+        try { const now = Math.floor(Date.now()/1000); signed = await signPayload("hail.address-binding",
+          { type: "hail.address-binding",version:1,address:account.canonicalAddress,did,issued_at:now,
+            expires_at:now+90*86400,key_id:keyId },createWebCryptoSigner(keyId,await importEd25519PrivateKey(secret))); }
+        finally { secret.fill(0); }
+        await this.sql`UPDATE private_poc_onboarding_preparations SET initial_binding_cose=${signed}
+          WHERE account_id=${accountId} AND initial_binding_cose IS NULL`;
+      }
+      const stored = await this.sql<{ initial_binding_cose: Uint8Array }[]>`
+        SELECT initial_binding_cose FROM private_poc_onboarding_preparations WHERE account_id=${accountId}`;
+      if (bindingCose.length && !Buffer.from(bindingCose).equals(Buffer.from(stored[0]!.initial_binding_cose))) throw new Error("Managed binding retry changed bytes");
+      bindingCose = new Uint8Array(stored[0]!.initial_binding_cose);
+    }
     const binding = await verifySignedPayload("hail.address-binding", bindingCose,
       createWebCryptoVerifier(async (kid) => {
         if (kid !== keyId) throw new Error("Address Binding has another identity signer");
@@ -164,7 +189,10 @@ export class PrivatePocOnboarding {
           VALUES (${randomUUID()}, ${accountId}, ${did}, ${operationCid}, ${this.registryOrigin},
             ${JSON.stringify(operation)}::jsonb, ${operationBytes}, ${dagCborBytes},
             ${JSON.stringify(state)}::jsonb, 'prepared')`;
-        await tx`INSERT INTO portable_custody_evidence
+        if (prepared.custody_profile === "managed") {
+          await tx`INSERT INTO managed_custody_evidence (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode)
+            VALUES (${accountId},${prepared.user_recovery_public_key},${prepared.user_identity_public_key},'poc-local')`;
+        } else await tx`INSERT INTO portable_custody_evidence
           (account_id, user_recovery_public_key, user_identity_public_key,
            monitor_origin, monitor_public_key, monitor_confirmed_at,
            backup_confirmed_at, monitor_verification_mode)

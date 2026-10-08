@@ -103,6 +103,56 @@ the provider; no user identity private key is stored there.
 
 ## API-first account management direction
 
+### Extended local CLI slice (migration 33)
+
+The local code adds explicit private-PLC self-service signup, owner-controlled
+or managed identity with owner recovery, scoped credential creation/revocation,
+Grant proposals/listing, sending, inbox/status and invited replies. No new
+code in this slice has been rolled to the live VPS. Follow the
+[CLI workflows](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/cli-workflows.md).
+
+`POC_SELF_SERVICE_ONBOARDING=true` enables `POST /api/v1/onboarding` and
+`POST /api/v1/onboarding/{account_id}` only on the pinned private PLC service
+profile. Prepare submits address, public recovery/identity keys, explicit
+custody, backup confirmation and a client-generated signup token hash.
+Registration requires that bearer secret and the exact owner-top-signed
+genesis plus an owner binding (managed bindings are provider-signed/cached).
+Public genesis alone cannot claim credentials. Activation validates published
+address/PLC evidence before issuing initial full-access credentials. This
+20-request/minute process-local signup gate is a controlled POC, not production
+abuse protection or public-registry onboarding. Managed evidence is separate
+from portable custody; portable key-separation/transfer checks are not bypassed.
+
+Additional account endpoints:
+
+| Path | Method/scope | Purpose |
+| --- | --- | --- |
+| `/grants/proposals` | POST, `grants:write` | Verified unsigned owner proposal |
+| `/grants` | GET, `grants:read` | Scoped list, 50 items, `after` Grant-ID cursor |
+| `/grants/managed` | POST, `grants:write` | Explicit managed evidence; sign/create at provider |
+| `/grants/{id}/revoke` | POST, `grants:write` | Managed account's signed terminal revision |
+| `/credentials` | POST, `credentials:write` | Issue caller-generated token with inherited scopes or revoke own credential ID |
+| `/messages` | POST, `messages:write` | Text/Grant or invited reply with client-stable UUIDv7 |
+| `/messages/{id}/submit` | POST, `messages:write` | Resubmit exact own envelope |
+| `/messages/{id}` | GET, `messages:read` | Retained authenticated status, otherwise indeterminate |
+| `/inbox` | GET, `messages:read` | Delivered recipient list, 50 items, opaque `after` cursor |
+| `/inbox/{sender_did}/{id}` | GET, `messages:read` | Own delivered body/safe metadata, no bearer token |
+
+Paths are relative to `/api/v1/account`. JSON writes require uncoded
+`application/json`. Message inputs contain `messageId`, `text`, either
+`grantId`/`category` or `replyTo`, and optional `replyUntil`; text is bounded
+at 64 KiB. Stored envelopes bind retries to the same body, authorization and
+reply permission. Federation submission shares the operator CLI's submission
+service, preserving signed status versus generic receipt verification.
+
+Operator `account:credential-create` also accepts `--full-access` for all six
+account/Grant/message/credential scopes. Existing credentials are not silently
+escalated. Authenticated credential management creates only inherited scopes
+and revokes only own-account IDs. Rotate before expiry; expired-token recovery
+and production login, binding renewal, managed migration and public-PLC signup
+remain separate work. Account reads report explicit managed evidence as managed,
+not owner-controlled portable evidence. Both new signup modes remain `poc-local`.
+
 The selected product architecture is an authenticated account API used by
 human apps, agents and provider-native/Hail-provided CLI clients. Normal users
 and agents should not need SSH, database credentials or administrator CLI
@@ -111,9 +161,10 @@ managed profile lets the provider sign authorized identity operations while
 the account owner retains the top PLC recovery key. Both profiles are intended
 for people and agents.
 
-The current implementation has the authenticated account/Grant slice above,
-federation/transfer routes and operator CLI building blocks, not the full
-management API or the preferred managed onboarding profile. Extend the account boundary over existing services and
+The current implementation has the account/Grant/message APIs, opt-in private
+signup with both custody profiles, federation/transfer routes and operator
+building blocks. Production/public signup, renewal/recovery and managed
+migration still need work. Extend the account boundary over existing services and
 transactions rather than treating administrator CLIs as client APIs. The
 [API and custody plan](https://github.com/j4crev/hailproto/blob/main/docs/production-portable-custody.md#api-first-provider-and-cli-clients)
 defines the first authenticated slice, profile-specific signing, isolation,

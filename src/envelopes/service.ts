@@ -37,7 +37,7 @@ export class EnvelopeService {
   ) {}
 
   async create(senderDid: string, grantId: string, digestText: string, category: string,
-    replyUntil: number | null = null): Promise<CreatedEnvelope> {
+    replyUntil: number | null = null, messageId?: string): Promise<CreatedEnvelope> {
     const grant = await (this.grants.findReceivedForSender?.(grantId, senderDid) ??
       this.grants.findCurrentByGrantId(grantId));
     const now = this.now();
@@ -49,21 +49,21 @@ export class EnvelopeService {
     if (!scope || (scope.type === "categories" && !scope.values.includes(category)) ||
       (scope.type === "uncategorized" && category !== "")) throw new Error("Category is outside Grant scope");
     return this.createSigned(senderDid, grant.payload.grantor, { type: "grant", grant_id: grantId },
-      digestText, category || undefined, replyUntil);
+      digestText, category || undefined, replyUntil,messageId);
   }
 
   async createReply(senderDid: string, replyTo: string, digestText: string,
-    replyUntil: number | null = null): Promise<CreatedEnvelope> {
+    replyUntil: number | null = null, messageId?: string): Promise<CreatedEnvelope> {
     const original = await this.envelopes.receivedReplyOpportunity(senderDid, replyTo);
     if (!original || !original.reply.allowed || original.reply.until + 300 < this.now() ||
       original.from === senderDid) throw new Error("No unexpired received reply invitation for this sender");
     return this.createSigned(senderDid, original.from, { type: "reply", reply_to: replyTo },
-      digestText, undefined, replyUntil);
+      digestText, undefined, replyUntil,messageId);
   }
 
   private async createSigned(senderDid: string, recipientDid: string,
     authorization: HailEnvelope["authorization"], digestText: string,
-    category: string | undefined, replyUntil: number | null): Promise<CreatedEnvelope> {
+    category: string | undefined, replyUntil: number | null, messageId?:string): Promise<CreatedEnvelope> {
     const account = await this.accounts.getAccountByDid(senderDid);
     if (!account || account.state !== "active" || account.activationVerificationMode !== "public") {
       throw new Error("Sender requires public activation");
@@ -84,7 +84,7 @@ export class EnvelopeService {
     }
     const availableUntil = now + 31 * 86400;
     const payload: HailEnvelope = {
-      type: "hail.envelope", version: 1, message_id: uuidV7(now * 1000),
+      type: "hail.envelope", version: 1, message_id: messageId ?? uuidV7(now * 1000),
       from: senderDid, to: recipientDid, authorization,
       ...(category !== undefined ? { category } : {}),
       created_at: now, expires_at: now + 7 * 86400,

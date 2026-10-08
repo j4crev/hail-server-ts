@@ -35,6 +35,11 @@ import { AccountApiRepository } from "./accounts/repository.js";
 import { GrantService } from "./grants/service.js";
 import { AddressVerifier } from "./discovery/verifier.js";
 import { SenderProfileVerifier } from "./profiles/verifier.js";
+import { PrivatePocOnboarding } from "./onboarding/private-poc.js";
+import { ActivationService } from "./onboarding/activation.js";
+import { AccountMessaging } from "./accounts/messaging.js";
+import { EnvelopeService } from "./envelopes/service.js";
+import { submitEnvelope } from "./envelopes/submission.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -148,7 +153,14 @@ const app = createApp(config, schemaRehearsal ? {
   senderProfileStore: onboardingRepository,
   checkReadiness,
 } : {
+  ...(process.env.POC_SELF_SERVICE_ONBOARDING === "true" ? {selfServiceOnboarding:{sql:database.sql,
+    onboarding:new PrivatePocOnboarding(database.sql,plc,new KeyEncryptor(config.keyEncryptionKey),config.plcDirectoryUrl,config.hailServiceBase),
+    activation:new ActivationService(onboardingRepository,new AddressVerifier(plc,transport.fetch,transport.validateTarget),config.hailServiceBase,"public"),provider:config.publicOrigin}} : {}),
   accountApi: { accounts: new AccountApiRepository(database.sql), grants: grantRepository,
+    messaging:new AccountMessaging(database.sql,new BodyRepository(database.sql),new EnvelopeRepository(database.sql),
+      new EnvelopeService(onboardingRepository,grantRepository,new EnvelopeRepository(database.sql),new KeyEncryptor(config.keyEncryptionKey),resolver,config.hailServiceBase),
+      (sender,id)=>submitEnvelope(sender,id,new EnvelopeRepository(database.sql),resolver,
+        new DeliveryStatusReceiver(database.sql,onboardingRepository,resolver,config.hailServiceBase),transport)),
     service: new GrantService(onboardingRepository, grantRepository, new KeyEncryptor(config.keyEncryptionKey),
       resolver, new AddressVerifier(plc, transport.fetch, transport.validateTarget),
       new SenderProfileVerifier(resolver, transport.fetch, transport.validateTarget, undefined, onboardingRepository),
