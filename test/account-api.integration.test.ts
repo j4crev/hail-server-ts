@@ -55,6 +55,7 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
   let senderAvailable = true;
   let redirect = false;
   let losePutResponse = false;
+  let loseCredentialResponse = false;
   let redirectedRequests = 0;
   let messageResolver:HailDidResolver;
   const messageEncryptor=new KeyEncryptor(encodeBase64Url(randomBytes(32)));
@@ -107,6 +108,10 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
     server = Bun.serve({ hostname: "localhost", port: 0, tls, async fetch(request) {
       if (redirect) return new Response(null, { status: 302, headers: { Location: `https://localhost:${receiver.port}/` } });
       const response = await app.fetch(request);
+      if (loseCredentialResponse && request.method === "POST" && new URL(request.url).pathname === "/api/v1/account/credentials" && response.ok) {
+        loseCredentialResponse = false;
+        return new Response(null, { status: 503 });
+      }
       if (losePutResponse && request.method === "PUT" && response.ok) {
         losePutResponse = false;
         return new Response(null, { status: 503 });
@@ -283,6 +288,85 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
     expect((await app.request(grantUrl(), { method: "PUT", headers: { ...authorization(),
       "Content-Type": 'application/cose; cose-type="cose-sign1"' }, body: bad })).status).toBe(400);
     expect((await grants.findCurrentByGrantId(grantId))?.payload.status).toBe("active");
+  });
+
+  it("inventories credentials and issues deliberate subsets with exact retries and no scope escalation", async () => {
+    const manager = await accounts.issue(address, false, undefined, [...ALL_ACCOUNT_SCOPES]);
+    await json("credential-manager.json", credentialRecord(manager));
+    const path = join(directory, "agent.credential.json");
+    const args = ["credential", "create", "--output", path, "--scope", "grants:read", "--scope", "account:read"];
+    loseCredentialResponse = true;
+    const lost = await cli(args, "credential-manager.json");
+    expect(lost.stderr).toContain("HTTP_503");
+    const pending = JSON.parse(await readFile(path, "utf8"));
+    expect(pending.scopes).toEqual(["account:read", "grants:read"]);
+    const committed = await db.sql<{id:string}[]>`SELECT id FROM account_api_credentials WHERE token_hash=${new Uint8Array(createHash("sha256").update(pending.token).digest())}`;
+    expect(committed).toHaveLength(1);
+    const created = await cli(args, "credential-manager.json");
+    expect(created.exit, created.stderr).toBe(0);
+    const child = JSON.parse(await readFile(path, "utf8"));
+    expect(child.credentialId).toBe(committed[0]!.id);
+    expect(child.token).toBe(pending.token);
+    expect(child.scopes).toEqual(["account:read", "grants:read"]);
+    expect(created.stdout + created.stderr).not.toContain(child.token);
+    const retry = await cli(args, "credential-manager.json");
+    expect(retry.exit, retry.stderr).toBe(0);
+    expect(JSON.parse(retry.stdout).credentialId).toBe(child.credentialId);
+    expect((await cli(["credential", "create", "--output", path, "--scope", "account:read"], "credential-manager.json")).exit).toBe(1);
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(child);
+    expect((await cli(["credential", "list"], "agent.credential.json")).stderr).toContain("HTTP_403");
+    const forbiddenPath = join(directory, "forbidden.credential.json");
+    expect((await cli(["credential", "create", "--output", forbiddenPath], "agent.credential.json")).exit).toBe(1);
+    await expect(readFile(forbiddenPath)).rejects.toThrow();
+
+    const limited = await accounts.issue(address, false, undefined, ["account:read", "credentials:write"]);
+    const endpoint = `${origin}/api/v1/account/credentials`;
+    const post = (token: string, input: unknown) => app.request(endpoint, { method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify(input) });
+    const freshToken = () => `hailp_${encodeBase64Url(randomBytes(32))}`;
+    expect((await post(limited.token, { token: freshToken(), scopes: ["grants:write"] })).status).toBe(403);
+    expect((await post(child.token, { token: freshToken(), scopes: [...ALL_ACCOUNT_SCOPES] })).status).toBe(403);
+    for (const scopes of [[], ["account:read", "account:read"], ["unknown"], "account:read"]) {
+      expect((await post(manager.token, { token: freshToken(), scopes })).status).toBe(400);
+    }
+    expect((await post(manager.token, { token: child.token, scopes: [...ALL_ACCOUNT_SCOPES] })).status).toBe(409);
+    expect((await post(limited.token, { token: manager.token })).status).toBe(409);
+    expect((await post(manager.token, { token: freshToken(), revoke: child.credentialId })).status).toBe(400);
+    const duplicate = await app.request(endpoint, { method: "POST", headers: {
+      Authorization: `Bearer ${manager.token}`, "Content-Type": "application/json" },
+      body: `{"token":"${freshToken()}","scopes":["account:read"],"scopes":[]}` });
+    expect(duplicate.status).toBe(400);
+    expect((await app.request(endpoint, { method: "POST", headers: {
+      Authorization: `Bearer ${manager.token}`, "Content-Type": "application/json", "Content-Encoding": "gzip" }, body: "{}" })).status).toBe(415);
+
+    await accounts.revoke(child.credentialId, ownerId);
+    expect((await post(manager.token, { token: child.token, scopes: child.scopes })).status).toBe(409);
+    const expired = await accounts.issue(address);
+    await db.sql`UPDATE account_api_credentials SET created_at=now()-interval '2 days', expires_at=now()-interval '1 day' WHERE id=${expired.credentialId}`;
+    expect((await post(manager.token, { token: expired.token, scopes: expired.scopes })).status).toBe(409);
+    const foreign = await accounts.issue(otherAddress, false, undefined, [...ALL_ACCOUNT_SCOPES]);
+    expect((await post(manager.token, { token: foreign.token, scopes: foreign.scopes })).status).toBe(409);
+    for (let index = 0; index < 51; index++) await accounts.issue(address);
+    const inventory = await cli(["credential", "list"], "credential-manager.json");
+    expect(inventory.exit, inventory.stderr).toBe(0);
+    const page = JSON.parse(inventory.stdout);
+    expect(page.credentials).toHaveLength(50);
+    expect(page.next).toBe(page.credentials[49].credentialId);
+    const following = await cli(["credential", "list", "--after", page.next], "credential-manager.json");
+    expect(following.exit, following.stderr).toBe(0);
+    const last = JSON.parse(following.stdout);
+    expect(last.next).toBeNull();
+    const all = [...page.credentials, ...last.credentials];
+    const count = await db.sql<{count:number}[]>`SELECT count(*)::integer AS count FROM account_api_credentials WHERE account_id=${ownerId}`;
+    expect(all).toHaveLength(count[0]!.count);
+    expect(new Set(all.map(row => row.credentialId)).size).toBe(all.length);
+    expect(all.some(row => row.credentialId === foreign.credentialId)).toBe(false);
+    expect(all.find(row => row.credentialId === child.credentialId).status).toBe("revoked");
+    expect(all.find(row => row.credentialId === expired.credentialId).status).toBe("expired");
+    for (const row of all) expect(Object.keys(row)).toEqual(["credentialId", "scopes", "createdAt", "expiresAt", "revokedAt", "status"]);
+    expect(inventory.stdout + following.stdout).not.toContain(manager.token);
+    expect((await app.request(`${endpoint}?after=not-a-uuid`, { headers: { Authorization: `Bearer ${manager.token}` } })).status).toBe(400);
+    expect((await app.request(`${endpoint}?account=${otherId}`, { headers: { Authorization: `Bearer ${manager.token}` } })).status).toBe(400);
   });
 
   it("sends, reads inbox and replies through real CLI with durable message IDs and scoped ownership",async()=>{

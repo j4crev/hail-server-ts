@@ -29,6 +29,9 @@ import type { GrantRepository } from "./grants/repository.js";
 import type { GrantService } from "./grants/service.js";
 import { registerSelfServiceOnboarding, type SelfServiceOnboarding } from "./accounts/onboarding-routes.js";
 import type { AccountMessaging } from "./accounts/messaging.js";
+import { registerAccountAccess } from "./accounts/access-routes.js";
+import type { AccountAccess } from "./accounts/access.js";
+import type { SQL } from "bun";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -53,6 +56,7 @@ export interface AppDependencies {
   transferCancellationReceiver?: TransferCancellationReceiver;
   accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging };
   selfServiceOnboarding?: SelfServiceOnboarding;
+  accountAccess?: { access: AccountAccess; sql: SQL };
 }
 
 const defaultDependencies: AppDependencies = {
@@ -68,6 +72,7 @@ export function createApp(
   const app = new Hono();
   const protectedSchedule = new ProtectedResponseSchedule();
   if(dependencies.selfServiceOnboarding)registerSelfServiceOnboarding(app,dependencies.selfServiceOnboarding);
+  if (dependencies.accountAccess) registerAccountAccess(app, dependencies.accountAccess.access, dependencies.accountAccess.sql);
 
   if (dependencies.accountApi) {
     const { accounts, grants, service, messaging } = dependencies.accountApi;

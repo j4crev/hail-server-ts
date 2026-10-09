@@ -40,6 +40,8 @@ import { ActivationService } from "./onboarding/activation.js";
 import { AccountMessaging } from "./accounts/messaging.js";
 import { EnvelopeService } from "./envelopes/service.js";
 import { submitEnvelope } from "./envelopes/submission.js";
+import { AccountAccess } from "./accounts/access.js";
+import { assertPrivatePocRegistry } from "./migration/poc-profile.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -72,6 +74,7 @@ const transferWorker = new TransferDeliveryWorker(database.sql, invitationDelive
 const transferRateLimit = new TransferRateLimit(database.sql);
 const transferCleanup = new TransferCleanup(database.sql, transferRateLimit);
 const schemaRehearsal = process.env.POC_SCHEMA_REHEARSAL === "true";
+if (!schemaRehearsal && process.env.POC_ACCOUNT_ACCESS === "true") assertPrivatePocRegistry(config.plcDirectoryUrl, config.hailServiceBase);
 if (schemaRehearsal && (config.plcDirectoryUrl !== "http://plc:2582" ||
   !config.databaseUrl.endsWith("/hail_private_stage"))) {
   throw new Error("POC schema rehearsal must use the internal PLC and isolated database clone");
@@ -153,6 +156,8 @@ const app = createApp(config, schemaRehearsal ? {
   senderProfileStore: onboardingRepository,
   checkReadiness,
 } : {
+  ...(process.env.POC_ACCOUNT_ACCESS === "true" ?
+    { accountAccess: { access: new AccountAccess(database.sql, resolver, config.publicOrigin), sql: database.sql } } : {}),
   ...(process.env.POC_SELF_SERVICE_ONBOARDING === "true" ? {selfServiceOnboarding:{sql:database.sql,
     onboarding:new PrivatePocOnboarding(database.sql,plc,new KeyEncryptor(config.keyEncryptionKey),config.plcDirectoryUrl,config.hailServiceBase),
     activation:new ActivationService(onboardingRepository,new AddressVerifier(plc,transport.fetch,transport.validateTarget),config.hailServiceBase,"public"),provider:config.publicOrigin}} : {}),

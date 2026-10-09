@@ -24,6 +24,7 @@ import {createApp} from "../src/app.js";
 import {PlcHailDidResolver} from "../src/plc/resolver.js";
 import type {PlcDirectoryClient} from "../src/plc/client.js";
 import type {AppConfig} from "../src/config.js";
+import {rotateCredential} from "../../hail-user-client-ts/src/credential-rotation.js";
 
 const integration=process.env.DATABASE_URL?describe:describe.skip;
 integration("self-service custody profiles and credentials",()=>{
@@ -110,6 +111,16 @@ integration("self-service custody profiles and credentials",()=>{
       const credential=await client.request("/credentials",{token:newToken});
       expect((await client.request("/credentials",{token:newToken})).credentialId).toBe(credential.credentialId);
       expect((await client.request("/credentials",{revoke:credential.credentialId})).revoked).toBe(true);
+      const directoryWrites = writes;
+      const rotation = await rotateCredential(paths.credential, join(directory, "rotated.json"));
+      expect(await rotateCredential(paths.credential, join(directory, "rotated.json"))).toEqual(rotation);
+      const rotatedAccount = await (await AccountApiClient.fromCredentialFile(join(directory, "rotated.json"))).account();
+      expect(rotatedAccount.credential?.credentialId).toBe(rotation.credentialId);
+      expect(rotatedAccount.credential?.expiresAt).toBe(rotation.expiresAt);
+      expect(rotatedAccount.custodyProfile).toBe(custody);
+      expect(rotatedAccount.ownerRecoveryPublicKey).toBe(vault.vault.recovery.publicDidKey);
+      expect(rotatedAccount.scopes).toEqual(summary.scopes);
+      expect(writes).toBe(directoryWrites);
     } finally {vault.recoverySecret.fill(0);vi.unstubAllGlobals();await rm(directory,{recursive:true,force:true});}
   });
 });

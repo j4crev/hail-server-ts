@@ -1,6 +1,8 @@
 import type { SQL } from "bun";
 
 const limits = {
+  "access-prepare": 20,
+  "access-complete": 60,
   grant: 120,
   invitation: 120,
   reservation: 120,

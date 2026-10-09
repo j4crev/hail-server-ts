@@ -7,12 +7,15 @@ export const ALL_ACCOUNT_SCOPES = ["account:read","grants:read","grants:write","
 export type AccountApiScope = typeof ALL_ACCOUNT_SCOPES[number];
 export interface AccountApiSession {
   account_id: string;
+  credential_id: string;
+  credential_expires_at: Date;
   did: string;
   canonical_address: string;
   scopes: AccountApiScope[];
   migration_state: "fenced" | "exported" | "retired" | null;
 }
 export const tokenHash = (token: string) => new Uint8Array(createHash("sha256").update(token).digest());
+export class CredentialConflictError extends Error {}
 
 export class AccountApiRepository {
   constructor(private readonly sql: SQL) {}
@@ -21,7 +24,11 @@ export class AccountApiRepository {
     const token = suppliedToken ?? `hailp_${encodeBase64Url(randomBytes(32))}`;
     if (!/^hailp_[A-Za-z0-9_-]{43}$/.test(token)) throw new Error("Invalid API token");
     const id = randomUUID();
-    const scopes: AccountApiScope[] = requestedScopes ?? ["account:read", "grants:read", ...(writeGrants ? ["grants:write" as const] : [])];
+    const selected = requestedScopes ?? ["account:read", "grants:read", ...(writeGrants ? ["grants:write" as const] : [])];
+    if (!selected.length || new Set(selected).size !== selected.length || selected.some(scope => !ALL_ACCOUNT_SCOPES.includes(scope as AccountApiScope))) {
+      throw new Error("Invalid credential scopes");
+    }
+    const scopes = ALL_ACCOUNT_SCOPES.filter(scope => selected.includes(scope));
     return this.sql.begin(async (tx) => {
       const accounts = await tx<{ id: string }[]>`
         SELECT id FROM provider_accounts WHERE canonical_address = ${canonicalizeHailAddress(address)}
@@ -33,8 +40,10 @@ export class AccountApiRepository {
       const prior = await tx<{id:string;account_id:string;expires_at:Date;revoked_at:Date|null;scopes:unknown}[]>`
         SELECT id,account_id,expires_at,revoked_at,scopes FROM account_api_credentials WHERE token_hash=${tokenHash(token)}`;
       if (prior[0]) {
-        if (prior[0].account_id !== account.id || prior[0].revoked_at || prior[0].expires_at.getTime() <= Date.now()) throw new Error("Credential cannot be reused");
-        return {credentialId:prior[0].id,accountId:account.id,token,scopes:typeof prior[0].scopes === "string" ? JSON.parse(prior[0].scopes) as AccountApiScope[] : prior[0].scopes as AccountApiScope[],expiresAt:prior[0].expires_at.toISOString()};
+        if (prior[0].account_id !== account.id || prior[0].revoked_at || prior[0].expires_at.getTime() <= Date.now()) throw new CredentialConflictError("Credential cannot be reused");
+        const priorScopes = typeof prior[0].scopes === "string" ? JSON.parse(prior[0].scopes) as AccountApiScope[] : prior[0].scopes as AccountApiScope[];
+        if (JSON.stringify([...priorScopes].sort()) !== JSON.stringify([...scopes].sort())) throw new CredentialConflictError("Credential retry changed requested scopes");
+        return {credentialId:prior[0].id,accountId:account.id,token,scopes:priorScopes,expiresAt:prior[0].expires_at.toISOString()};
       }
       const rows = await tx<{ expires_at: Date }[]>`
         INSERT INTO account_api_credentials (id, account_id, token_hash, scopes, expires_at)
@@ -51,11 +60,26 @@ export class AccountApiRepository {
     if (!rows.length) throw new Error("API credential does not exist");
   }
 
+  async listCredentials(session: AccountApiSession, after: string | null) {
+    const rows = await this.sql<{ id: string; scopes: AccountApiScope[] | string;
+      created_at: Date; expires_at: Date; revoked_at: Date | null; status: string }[]>`
+      SELECT id, scopes, created_at, expires_at, revoked_at,
+        CASE WHEN revoked_at IS NOT NULL THEN 'revoked' WHEN expires_at <= now() THEN 'expired' ELSE 'active' END AS status
+      FROM account_api_credentials WHERE account_id=${session.account_id}
+        AND (${after}::uuid IS NULL OR id > ${after}::uuid) ORDER BY id LIMIT 51`;
+    return { credentials: rows.slice(0, 50).map(row => ({ credentialId: row.id,
+      scopes: typeof row.scopes === "string" ? JSON.parse(row.scopes) as AccountApiScope[] : row.scopes,
+      createdAt: row.created_at.toISOString(), expiresAt: row.expires_at.toISOString(),
+      revokedAt: row.revoked_at?.toISOString() ?? null, status: row.status })),
+      next: rows.length > 50 ? rows[49]!.id : null };
+  }
+
   async authenticate(header: string | undefined): Promise<AccountApiSession | null> {
     const token = /^Bearer (hailp_[A-Za-z0-9_-]{43})$/i.exec(header ?? "")?.[1];
     if (!token) return null;
     const rows = await this.sql<(Omit<AccountApiSession, "scopes"> & { scopes: unknown })[]>`
-      SELECT account.id AS account_id, account.did, account.canonical_address,
+      SELECT account.id AS account_id, credential.id AS credential_id,
+        credential.expires_at AS credential_expires_at, account.did, account.canonical_address,
         credential.scopes, fence.state AS migration_state
       FROM account_api_credentials credential JOIN provider_accounts account ON account.id = credential.account_id
       LEFT JOIN provider_migration_fences fence ON fence.account_id = account.id
@@ -82,7 +106,8 @@ export class AccountApiRepository {
       did: session.did, address: session.canonical_address, migrationState: session.migration_state,
       custodyProfile: profile, monitorVerificationMode: managed[0] ? "poc-local" : custody[0]?.monitor_verification_mode ?? null,
       identityPublicKey: custody[0]?.user_identity_public_key ?? identity?.public_key ?? null,
-      ownerRecoveryPublicKey: managed[0]?.owner_recovery_public_key ?? custody[0]?.user_recovery_public_key ?? null, scopes: session.scopes };
+      ownerRecoveryPublicKey: managed[0]?.owner_recovery_public_key ?? custody[0]?.user_recovery_public_key ?? null, scopes: session.scopes,
+      credential: { credentialId: session.credential_id, expiresAt: session.credential_expires_at.toISOString() } };
   }
 
   async isManaged(accountId: string) { return (await this.sql`SELECT account_id FROM managed_custody_evidence WHERE account_id=${accountId}`).length === 1; }
