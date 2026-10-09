@@ -105,6 +105,38 @@ the provider; no user identity private key is stored there.
 
 ## API-first account management direction
 
+### Active Grant revisions (local, not deployed)
+
+The next slice adds active signed Grant updates through owner proposals/import
+and explicit managed signing, plus multiple selected categories without wildcards.
+Expansion, scope switches, expiry extension and consent refresh reverify exact
+current address/profile evidence; restrictions preserve consent without sender
+availability. Atomic appends retain immutable history/evidence and ordered outbox
+responsibility. Exact historical retries do not replace current state.
+
+New endpoints are `POST /api/v1/account/grants/{id}/proposals` and `/update` for
+managed signatures; both require `grants:write` and reject fenced accounts.
+There is no new Grant schema migration or unsigned blocking. New signer epochs
+are held pending reviewed historical-key reconciliation. See the
+[revision contract](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/grant-revisions.md)
+and [key decision](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/grant-key-reconciliation.md).
+
+### Address Binding renewal (local migration 35)
+
+The next local slice adds `GET/POST /api/v1/account/binding` and
+`hailp binding show/renew`. Reading exposes selected signed expiry and seven-day
+reminder metadata; renewal needs deliberate `account:write` authority, current
+identity/service ownership and an active/public account. Migration 35 expands
+the scope constraint without upgrading existing credentials. This is not deployed.
+
+Provider-domain renewals retain the 90-day maximum and immutable signed history.
+Hosting commits before compare-and-select publication; exact retries repair
+verification failures and never reselect a superseded binding. Owner-controlled
+signing stays identity-only; managed signing requires explicit managed custody.
+Expired/unauthorized credentials, changed keys and source fences cannot renew.
+Existing Grants and completed signup evidence are retained. See the
+[renewal contract/proof](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/binding-renewal.md).
+
 ### Credential lifecycle extension
 
 The deployed API-plus-CLI slice adds `GET /api/v1/account/credentials` for
