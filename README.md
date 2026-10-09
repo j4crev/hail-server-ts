@@ -11,8 +11,10 @@ Hail Protocol checkout at
 
 The deployed private-PLC POC supports Grant-authorized detached-body delivery,
 signed terminal status, revocation, single-use replies and user-authorized
-provider transfer with pending-message continuity. Provider databases are at
-migration 31. A separate same-VPS monitor proves signed-alert functionality,
+provider transfer with pending-message continuity. The October 9 CLI release adds
+private-PLC self-service signup and the account API; provider databases are at
+migration 34, including verified owner-key access recovery and credential
+inventory/scoped issuance/rotation. A separate same-VPS monitor proves signed-alert functionality,
 but is not independent production monitoring.
 
 - [Provider deployment and delivery runbook](deploy/poc/README.md).
@@ -29,8 +31,8 @@ Migration 32 adds the first authenticated account-management slice used by
 `hailp` in `hail-user-client-ts`. It is separate from federation and supports
 existing active accounts, account details, current signed Grant retrieval and
 user-signed Grant creation/revocation import. It reuses the existing Grant
-service and transactional publication outbox. This is local implementation
-work; the recorded deployed POC remains at migration 31 until a separate rollout.
+service and transactional publication outbox. The October 9 rollout deployed
+the extended migration-33 slice; see the [release evidence](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/cli-release-rollout.md).
 
 ### Bootstrap credentials (provider operator)
 
@@ -103,12 +105,59 @@ the provider; no user identity private key is stored there.
 
 ## API-first account management direction
 
-### Extended local CLI slice (migration 33)
+### Credential lifecycle extension
 
-The local code adds explicit private-PLC self-service signup, owner-controlled
+The deployed API-plus-CLI slice adds `GET /api/v1/account/credentials` for
+account-scoped inventory and optional `scopes` in credential issuance for
+deliberate subsets. Both require `credentials:write`; inventory omits tokens/
+hashes and returns at most 50 entries with an `after`/`next` UUID cursor.
+Scope escalation is 403; changed-scope, cross-account and revoked/expired token
+retries are 409. Existing `{token}` inherited issuance remains supported.
+See the [credential lifecycle contract/proof](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/credential-lifecycle.md)
+and [post-expiry access design](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/account-access-recovery.md).
+The [lifecycle release](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/lifecycle-release.md)
+is deployed to both POC providers, including the migration-34 login/recovery
+slice described below.
+
+The account response also includes current credential ID/expiry metadata.
+`hailp credential rotate --output <new-private-file>` uses existing issuance,
+account reads and revocation with a retained private rotation sidecar. It verifies
+the replacement and preserves scopes before revoking the original; fresh-process
+retries recover successful issuance/revocation even after response loss. This
+does not authenticate expired credentials or modify identity/recovery authority.
+
+### Post-expiry owner login/recovery (migration 34)
+
+`POC_ACCOUNT_ACCESS=true` explicitly enables private-PLC
+`POST /api/v1/account-access/prepare` and `/complete`. The existing private-registry
+guard rejects unsupported registry configurations. Migration 34 adds only a
+provider-local bounded challenge table; it changes no existing credential/custody
+data and is not exported with portable DID state. Existing routes remain usable
+with the access gate disabled. Both POC providers now enable it; both custody
+profiles passed real HTTPS expiry/recovery/rotation/scope proof on each host.
+
+The client explicitly selects DID, signer and scopes. Owner-controlled identity
+proof and explicit owner-top-recovery proof are accepted only with fresh verified
+PLC authority, source service ownership and matching reviewed custody/key-role
+evidence. Provider-held managed identity signatures, lower provider recovery keys,
+historical/mismatched keys, inactive accounts and all migration-fence states are
+rejected. No user private key is imported and no PLC operation is published.
+
+Challenges are provider/DID/account/purpose/scope/token-hash bound, expire within
+five minutes, and persist across process restart. Completion consumes the nonce
+and issues the credential under the account-row lock in one transaction; an exact
+still-valid retry returns the same ID/expiry. Persistent preparation/completion
+rate buckets, bounded retention and protected generic completion responses reuse
+existing provider primitives. See the [recovery contract](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/account-access-recovery.md)
+and [local verification](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/account-access-verification.md).
+
+### Extended CLI slice (migration 33)
+
+The code adds explicit private-PLC self-service signup, owner-controlled
 or managed identity with owner recovery, scoped credential creation/revocation,
-Grant proposals/listing, sending, inbox/status and invited replies. No new
-code in this slice has been rolled to the live VPS. Follow the
+Grant proposals/listing, sending, inbox/status and invited replies. Both POC
+providers were rolled out on October 9; both custody profiles passed HTTPS
+signup/account/credential smoke checks on each host. Follow the
 [CLI workflows](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/cli-workflows.md).
 
 `POC_SELF_SERVICE_ONBOARDING=true` enables `POST /api/v1/onboarding` and
