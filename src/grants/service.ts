@@ -5,6 +5,7 @@ import {
   createWebCryptoVerifier,
   signPayload,
   verifySignedPayload,
+  validatePayload,
   type HailGrant,
   type HailGrantScope,
 } from "@hailproto/codec";
@@ -20,6 +21,7 @@ import type { PlcResolutionEvidence } from "../plc/resolver.js";
 import type { SenderProfileVerifier } from "../profiles/verifier.js";
 import type { GrantStore, SignedGrantRevision, SignedGrantRevisionInput } from "./store.js";
 import { inspectSignedPayload } from "@hailproto/codec";
+import { expandsAuthorization, restrictsAuthorization } from "./revision.js";
 
 export interface GrantAccountRepository {
   getAccountByAddress(address: string): Promise<AccountRecord>;
@@ -30,13 +32,19 @@ export interface GrantDefinition {
   scope: HailGrantScope;
   expiresAt: number | null;
 }
+export interface GrantUpdateDefinition extends GrantDefinition {
+  expectedRevision:number;expectedDigest:Uint8Array;refreshConsent:boolean;sender?:string;
+}
 
 export class UserGrantError extends Error {
   constructor(readonly status: 400 | 409, message: string) { super(message); }
 }
 
 function normalizeScope(scope: HailGrantScope): HailGrantScope {
-  if (scope.type === "uncategorized") return { type: "uncategorized" };
+  if(!scope||typeof scope!=="object"||Array.isArray(scope))throw new UserGrantError(400,"Invalid Grant scope");
+  if (scope.type === "uncategorized"&&Object.keys(scope).length===1) return { type: "uncategorized" };
+  if(scope.type!=="categories"||Object.keys(scope).length!==2||!Array.isArray(scope.values)||!scope.values.length||
+    new Set(scope.values).size!==scope.values.length||scope.values.some(value=>typeof value!=="string"||!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)))throw new UserGrantError(400,"Invalid selected categories");
   return {
     type: "categories",
     values: [...scope.values].sort((left, right) => Buffer.from(left).compare(Buffer.from(right))),
@@ -74,6 +82,50 @@ export class GrantService {
     private readonly expectedServiceBase: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
+
+  async prepareUserSignedUpdate(addressInput:string,grantId:string,input:GrantUpdateDefinition):Promise<HailGrant> {
+    const account=await this.accounts.getAccountByAddress(canonicalizeHailAddress(addressInput));
+    const current=await this.grants.findCurrentByGrantId(grantId);
+    if(!account.did||account.state!=="active"||account.activationVerificationMode!=="public"||!current||current.localRole!=="grantor"||
+      current.localAccountId!==account.id||current.payload.status!=="active"||current.payload.revision!==input.expectedRevision||
+      !Buffer.from(current.digest).equals(Buffer.from(input.expectedDigest)))throw new UserGrantError(409,"Current Grant does not match the reviewed revision");
+    const owner=await this.resolver.resolve(account.did);
+    if(owner.serviceBase!==this.expectedServiceBase||owner.identityDidKey!==current.signingPublicKey)throw new UserGrantError(409,"Historical-key reconciliation is required before changing signer epochs");
+    const now=Math.floor(this.now().getTime()/1000),updatedAt=Math.max(now,current.payload.updated_at+1);
+    if(updatedAt>now+300)throw new UserGrantError(400,"Grant timestamp is too far ahead");
+    const proposed:HailGrant={...current.payload,revision:current.payload.revision+1,previous:Uint8Array.from(current.digest),
+      scope:[normalizeScope(input.scope)],expires_at:input.expiresAt,updated_at:updatedAt,key_id:`${account.did}#hail-identity`};
+    validatePayload("hail.grant",proposed);
+    if(restrictsAuthorization(current.payload,proposed)&&input.refreshConsent)throw new UserGrantError(400,"Restrictions retain consent; refresh separately");
+    if(restrictsAuthorization(current.payload,proposed)&&input.sender!==undefined&&canonicalizeHailAddress(input.sender)!==current.payload.consent_context.grantee_address)throw new UserGrantError(400,"Restrictions cannot change the retained consent address");
+    const changed=expandsAuthorization(current.payload,proposed);
+    if(changed||input.refreshConsent){
+      if(changed&&proposed.expires_at!==null&&proposed.expires_at<=now)throw new UserGrantError(400,"Expanded authorization requires a future expiry");
+      const consent=await this.currentConsent(proposed,input.sender ?? current.payload.consent_context.grantee_address,false);
+      proposed.consent_context={grantee_address:consent.address.address,address_binding_hash:digest(consent.address.digest),sender_profile_hash:digest(consent.senderProfile.digest)};
+    } else if(!restrictsAuthorization(current.payload,proposed))throw new UserGrantError(400,"Unchanged permission requires explicit consent refresh");
+    return proposed;
+  }
+
+  private async currentConsent(payload:HailGrant,sender:string,match=true) {
+    const address=await this.addressVerifier.verify(canonicalizeHailAddress(sender));
+    const senderProfile=await this.profileVerifier.verify(address.did);
+    if(address.did!==payload.grantee||senderProfile.did!==payload.grantee||senderProfile.serviceBase!==address.serviceBase||
+      senderProfile.messagingDidKey!==address.messagingDidKey||match&&(payload.consent_context.grantee_address!==address.address||
+        !Buffer.from(payload.consent_context.address_binding_hash.value).equals(Buffer.from(address.digest))||
+        !Buffer.from(payload.consent_context.sender_profile_hash.value).equals(Buffer.from(senderProfile.digest))))throw new UserGrantError(400,"Current consent evidence differs from the signed Grant");
+    try{validateScopeAgainstProfile(payload.scope[0]!,senderProfile.profile);}catch{throw new UserGrantError(400,"Current profile does not offer the selected permission");}
+    return {address,senderProfile};
+  }
+
+  async updateManaged(addressInput:string,payload:HailGrant,signingKey:string):Promise<SignedGrantRevision> {
+    const account=await this.accounts.getAccountByAddress(canonicalizeHailAddress(addressInput));
+    if(!account.did||account.state!=="active"||account.activationVerificationMode!=="public")throw new UserGrantError(409,"Active grantor required");
+    const key=await this.accounts.getKey(account.id,"hail-identity"),resolved=await this.resolver.resolve(account.did);
+    if(key.publicKey!==signingKey||resolved.identityDidKey!==signingKey||resolved.serviceBase!==this.expectedServiceBase)throw new UserGrantError(409,"Managed signing key/provider changed");
+    const signed=await this.sign(account,key,payload,resolved.evidence);
+    return this.acceptUserSignedGrant(addressInput,payload.consent_context.grantee_address,signed.representation);
+  }
 
   // User-held identities sign outside the provider. The proposal has no
   // authority until the current #hail-identity key signs its exact Hail bytes.
@@ -137,6 +189,8 @@ export class GrantService {
       throw new UserGrantError(400, "User-signed Grant timestamp is too far ahead");
     }
     const retained = await this.grants.findCurrentByGrantId(payload.grant_id);
+    const historical=await this.grants.findRevisionByGrantId?.(payload.grant_id,payload.revision);
+    if(historical?.localRole==="grantor"&&historical.localAccountId===grantor.id&&Buffer.from(historical.representation).equals(Buffer.from(representation)))return historical;
     if (retained?.localRole === "grantor" && retained.localAccountId === grantor.id &&
       Buffer.from(retained.representation).equals(Buffer.from(representation))) return retained;
     if (payload.status === "revoked") {
@@ -147,6 +201,7 @@ export class GrantService {
         throw new UserGrantError(409, "Authoritative Grant or reviewed sender does not match revocation");
       }
       if (Buffer.from(current.representation).equals(Buffer.from(representation))) return current;
+      if(current.signingPublicKey!==resolved.identityDidKey)throw new UserGrantError(409,"Historical-key reconciliation required before a new signer epoch");
       if (current.payload.status !== "active" || payload.updated_at <= current.payload.updated_at ||
         !isDeepStrictEqual(payload, { ...current.payload, status: "revoked",
           revision: current.payload.revision + 1, previous: Uint8Array.from(current.digest),
@@ -164,6 +219,23 @@ export class GrantService {
         throw error;
       }
       return { ...signed, receivedAt: this.now() };
+    }
+    if(payload.revision>1) {
+      if(!retained||retained.localRole!=="grantor"||retained.localAccountId!==grantor.id||retained.payload.status!=="active"||
+        retained.signingPublicKey!==resolved.identityDidKey||payload.revision!==retained.payload.revision+1||!payload.previous||
+        !Buffer.from(payload.previous).equals(Buffer.from(retained.digest))||payload.updated_at<=retained.payload.updated_at||
+        payload.issued_at!==retained.payload.issued_at||payload.grantor!==retained.payload.grantor||payload.grantee!==retained.payload.grantee)throw new UserGrantError(409,"Grant revision or signing epoch conflicts with current state");
+      const restriction=restrictsAuthorization(retained.payload,payload);
+      if(restriction&&!isDeepStrictEqual(payload.consent_context,retained.payload.consent_context))throw new UserGrantError(400,"Restrictions must carry prior consent unchanged");
+      const expanded=expandsAuthorization(retained.payload,payload),refreshed=!isDeepStrictEqual(payload.consent_context,retained.payload.consent_context);
+      if(expanded&&payload.expires_at!==null&&payload.expires_at<=now)throw new UserGrantError(400,"Expanded authorization is expired");
+      // A same-semantics revision explicitly refreshes evidence even if its hashes are unchanged.
+      const consent=expanded||refreshed||!restriction?await this.currentConsent(payload,granteeAddressInput):undefined;
+      try {await this.grants.appendAuthoritativeUpdate({revision:signed,expectedCurrentRevision:retained.payload.revision,
+        expectedCurrentDigest:retained.digest,...(consent?{consent,destinationServiceBase:consent.address.serviceBase}:{})});}
+      catch(error){const winner=await this.grants.findRevisionByGrantId?.(payload.grant_id,payload.revision);
+        if(winner?.localAccountId===grantor.id&&Buffer.from(winner.representation).equals(Buffer.from(representation)))return winner;throw error;}
+      return {...signed,receivedAt:this.now()};
     }
     if (payload.revision !== 1 || payload.previous !== null || payload.updated_at !== payload.issued_at) {
       throw new UserGrantError(409, "User-signed initial Grant has invalid authority");
@@ -301,6 +373,7 @@ export class GrantService {
 
     const identityKey = await this.accounts.getKey(grantor.id, "hail-identity");
     const resolvedGrantor = await this.resolver.resolve(grantor.did);
+    if(current.signingPublicKey!==identityKey.publicKey)throw new UserGrantError(409,"Historical-key reconciliation required before a new signer epoch");
     if (
       resolvedGrantor.identityDidKey !== identityKey.publicKey ||
       resolvedGrantor.serviceBase !== this.expectedServiceBase

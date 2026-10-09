@@ -3,7 +3,7 @@ import { encodeBase64Url } from "@hailproto/codec";
 import type { SQL } from "bun";
 import { canonicalizeHailAddress } from "../identity/address.js";
 
-export const ALL_ACCOUNT_SCOPES = ["account:read","grants:read","grants:write","credentials:write","messages:read","messages:write"] as const;
+export const ALL_ACCOUNT_SCOPES = ["account:read","grants:read","grants:write","credentials:write","messages:read","messages:write","account:write"] as const;
 export type AccountApiScope = typeof ALL_ACCOUNT_SCOPES[number];
 export interface AccountApiSession {
   account_id: string;

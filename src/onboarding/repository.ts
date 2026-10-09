@@ -601,12 +601,13 @@ export class OnboardingRepository
     });
   }
 
-  async getBindingForAccount(accountId: string): Promise<PublishedAddressBinding> {
+  async getBindingForAccount(accountId: string, digest?: Uint8Array): Promise<PublishedAddressBinding> {
     const rows = await this.sql<BindingRow[]>`
       SELECT id, account_id, canonical_address, did, cose, representation_digest,
              issued_at, expires_at, published_at
       FROM address_bindings
       WHERE account_id = ${accountId}
+        AND (${digest ?? null}::bytea IS NULL OR representation_digest=${digest ?? null})
       ORDER BY created_at DESC
       LIMIT 1
     `;
@@ -618,14 +619,13 @@ export class OnboardingRepository
     const rows = await this.sql<BindingRow[]>`
       SELECT id, account_id, canonical_address, did, cose, representation_digest,
              issued_at, expires_at, published_at
-      FROM address_bindings
-      WHERE canonical_address = ${address}
-        AND selected_at IS NOT NULL
-        AND expires_at > now()
+      FROM (
+        SELECT * FROM address_bindings WHERE canonical_address=${address} AND selected_at IS NOT NULL
+        ORDER BY selected_at DESC, id DESC LIMIT 1
+      ) AS current_binding
+      WHERE expires_at > now()
         AND NOT EXISTS (SELECT 1 FROM provider_migration_fences fence
-          WHERE fence.did = address_bindings.did AND fence.state = 'retired')
-      ORDER BY selected_at DESC
-      LIMIT 1
+          WHERE fence.did = current_binding.did AND fence.state = 'retired')
     `;
     return rows[0] ? bindingFromRow(rows[0]) : null;
   }

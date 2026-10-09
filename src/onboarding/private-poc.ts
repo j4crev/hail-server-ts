@@ -244,7 +244,7 @@ export class PrivatePocOnboarding {
     if (account.state !== "address-staged" && account.state !== "active") {
       throw new Error("POC identity did not reach a stageable address state");
     }
-    const storedBinding = await repository.getBindingForAccount(accountId);
+    const storedBinding = await repository.getBindingForAccount(accountId, digest);
     if (!Buffer.from(storedBinding.cose).equals(Buffer.from(bindingCose)) ||
       !Buffer.from(storedBinding.digest).equals(Buffer.from(digest))) {
       throw new Error("POC onboarding retry changed the user's signed Address Binding");

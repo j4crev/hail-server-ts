@@ -35,6 +35,11 @@ export interface AuthoritativeGrantRevocation {
   readonly expectedCurrentDigest: Uint8Array;
 }
 
+export interface AuthoritativeGrantUpdate extends AuthoritativeGrantRevocation {
+  readonly consent?: GrantConsentEvidence;
+  readonly destinationServiceBase?: string;
+}
+
 export interface ReceivedGrantRevision {
   readonly localAccountId: string;
   readonly payload: HailGrant;
@@ -62,6 +67,7 @@ export interface ClaimedPublicationResult {
 
 export interface GrantStore {
   findCurrentByGrantId(grantId: string): Promise<SignedGrantRevision | null>;
+  findRevisionByGrantId?(grantId:string,revision:number):Promise<SignedGrantRevision|null>;
   findReceivedForSender?(grantId: string, senderDid: string): Promise<SignedGrantRevision | null>;
   findActiveAuthoritativeByDidPair(
     grantorDid: string,
@@ -69,6 +75,7 @@ export interface GrantStore {
   ): Promise<SignedGrantRevision | null>;
   insertAuthoritativeRevision1(input: AuthoritativeGrantRevision1): Promise<void>;
   appendAuthoritativeRevocation(input: AuthoritativeGrantRevocation): Promise<void>;
+  appendAuthoritativeUpdate(input: AuthoritativeGrantUpdate): Promise<void>;
   acceptReceivedRevision(input: ReceivedGrantRevision): Promise<SignedGrantRevision>;
   claimDuePublication(leaseDurationMs: number, now?: Date): Promise<GrantPublicationClaim | null>;
   acknowledgePublication(input: ClaimedPublicationResult & { etag: string }): Promise<void>;

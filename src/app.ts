@@ -32,6 +32,7 @@ import type { AccountMessaging } from "./accounts/messaging.js";
 import { registerAccountAccess } from "./accounts/access-routes.js";
 import type { AccountAccess } from "./accounts/access.js";
 import type { SQL } from "bun";
+import type { AccountBinding } from "./accounts/binding.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -54,7 +55,7 @@ export interface AppDependencies {
   transferRateLimit?: TransferRateLimit;
   transferCancellation?: TransferCancellationService;
   transferCancellationReceiver?: TransferCancellationReceiver;
-  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging };
+  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging; binding?:AccountBinding };
   selfServiceOnboarding?: SelfServiceOnboarding;
   accountAccess?: { access: AccountAccess; sql: SQL };
 }
@@ -75,8 +76,8 @@ export function createApp(
   if (dependencies.accountAccess) registerAccountAccess(app, dependencies.accountAccess.access, dependencies.accountAccess.sql);
 
   if (dependencies.accountApi) {
-    const { accounts, grants, service, messaging } = dependencies.accountApi;
-    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging);
+    const { accounts, grants, service, messaging, binding } = dependencies.accountApi;
+    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding);
   }
 
   if (dependencies.discoveryStore) {

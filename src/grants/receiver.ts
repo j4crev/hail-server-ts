@@ -11,6 +11,8 @@ import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { AccountRecord } from "../onboarding/repository.js";
 import type { HailDidResolver } from "../plc/resolver.js";
 import type { GrantStore, SignedGrantRevision } from "./store.js";
+import { restrictsAuthorization } from "./revision.js";
+import { isDeepStrictEqual } from "node:util";
 
 const STRONG_ETAG = /^"([A-Za-z0-9_-]{43})"$/;
 
@@ -171,6 +173,7 @@ export class GrantReceiver {
         : { status: 204, etag: etag(digest), created: false };
     }
     if (current) {
+      if(restrictsAuthorization(current.payload,payload)&&!isDeepStrictEqual(current.payload.consent_context,payload.consent_context))throw new GrantReceiveError(409,"Restrictions must retain prior consent");
       if (
         current.localRole !== "grantee" ||
         current.payload.grantor !== payload.grantor ||

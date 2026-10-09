@@ -1,4 +1,4 @@
-import { encodeBase64Url, HailCodecError, inspectSignedPayload, toDiagnosticJson } from "@hailproto/codec";
+import { decodeBase64Url, encodeBase64Url, fromDiagnosticJson, HailCodecError, inspectSignedPayload, toDiagnosticJson, type DiagnosticJson } from "@hailproto/codec";
 import type { Context, Hono } from "hono";
 import { isCoseSign1MediaType } from "../http/media-type.js";
 import { GrantConflictError, type GrantRepository } from "../grants/repository.js";
@@ -6,6 +6,7 @@ import { UserGrantError, type GrantService } from "../grants/service.js";
 import { ALL_ACCOUNT_SCOPES, CredentialConflictError, type AccountApiRepository } from "./repository.js";
 import type { AccountMessaging } from "./messaging.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
+import { BindingError, type AccountBinding } from "./binding.js";
 
 const GRANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BYTES = 262_144;
@@ -34,10 +35,10 @@ export async function accountRequestBytes(request: Request): Promise<Uint8Array 
 }
 
 export function registerAccountApiRoutes(app: Hono, accounts: AccountApiRepository,
-  grants: GrantRepository, service: GrantService, provider: string, messaging?:AccountMessaging): void {
+  grants: GrantRepository, service: GrantService, provider: string, messaging?:AccountMessaging, binding?:AccountBinding): void {
   let window = Date.now();
   let requests = 0;
-  const handle = async (context: Context, grantId: string | null, action?: string) => {
+  const handle = async (context: Context, grantId: string | null, action?: string):Promise<Response> => {
     context.header("Cache-Control", "no-store");
     context.header("Vary", "Authorization");
     const problem = (status: 400 | 401 | 403 | 404 | 405 | 409 | 413 | 415 | 429 | 503) => {
@@ -55,6 +56,45 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
       const query = new URL(context.req.url).searchParams;
       if (query.size && action !== "list" && action !== "inbox" && action !== "credential") return problem(400);
       const method = context.req.method;
+      if(action==="update-proposal"||action==="managed-update") {
+        if(!session.scopes.includes("grants:write"))return problem(403);
+        if(method!=="POST")return problem(405);if(session.migration_state)return problem(409);
+        if(!grantId||!GRANT_ID.test(grantId))return problem(400);
+        const current=await grants.findCurrentByGrantId(grantId);
+        if(!current||current.localAccountId!==session.account_id||current.localRole!=="grantor")return problem(404);
+        if(context.req.header("Content-Type")!=="application/json"||context.req.header("Content-Encoding")!==undefined)return problem(415);
+        const bytes=await accountRequestBytes(context.req.raw);if(!bytes||bytes.length>16384)return problem(413);
+        let input:Record<string,unknown>;
+        try{input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes)) as Record<string,unknown>;
+          if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Invalid input");}catch{return problem(400);}
+        if(action==="managed-update") {
+          if(!await accounts.isManaged(session.account_id))return problem(403);
+          if(Object.keys(input).length!==2||Object.keys(input).some(k=>!["payload","signingKey"].includes(k))||typeof input.signingKey!=="string")return problem(400);
+          const payload=fromDiagnosticJson("hail.grant",input.payload as DiagnosticJson);if(payload.grant_id!==grantId||payload.grantor!==session.did||payload.status!=="active")return problem(400);
+          const saved=await service.updateManaged(session.canonical_address,payload,input.signingKey);
+          return context.json({grantId,revision:saved.payload.revision,status:saved.payload.status,digest:encodeBase64Url(saved.digest),publication:"durable",cose:encodeBase64Url(saved.representation)});
+        }
+        if(Object.keys(input).some(k=>!["scope","expiresAt","expectedRevision","expectedDigest","refreshConsent","sender"].includes(k))||
+          !Number.isSafeInteger(input.expectedRevision)||typeof input.expectedDigest!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(input.expectedDigest)||
+          typeof input.refreshConsent!=="boolean"||input.expiresAt!==null&&!Number.isSafeInteger(input.expiresAt)||
+          input.sender!==undefined&&typeof input.sender!=="string"||!input.scope||typeof input.scope!=="object"||Array.isArray(input.scope))return problem(400);
+        const proposed=await service.prepareUserSignedUpdate(session.canonical_address,grantId,{scope:input.scope as import("@hailproto/codec").HailGrantScope,
+          expiresAt:input.expiresAt as number|null,expectedRevision:input.expectedRevision as number,expectedDigest:decodeBase64Url(input.expectedDigest),
+          refreshConsent:input.refreshConsent,...(input.sender?{sender:input.sender as string}:{})});
+        return context.json({type:"hailp.grant-proposal",version:1,grant:toDiagnosticJson("hail.grant",proposed)});
+      }
+      if(action==="binding") {
+        if(!session.scopes.includes(method==="GET"?"account:read":"account:write"))return problem(403);
+        if(!binding)return problem(503);
+        if(method==="GET")return context.json(await binding.show(session));
+        if(method!=="POST")return problem(405);
+        if(context.req.header("Content-Type")!=="application/json"||context.req.header("Content-Encoding")!==undefined)return problem(415);
+        const bytes=await accountRequestBytes(context.req.raw);if(!bytes||bytes.length>32768)return problem(413);
+        let input:Record<string,unknown>;
+        try {input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes)) as Record<string,unknown>;
+          if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Invalid object");}catch{return problem(400);}
+        return context.json(await binding.renew(session,input));
+      }
       const scope = action === "send" || action === "resubmit" ? "messages:write" : ["inbox","read","status"].includes(action ?? "") ? "messages:read" : action === "credential" ? "credentials:write" : action === "proposal" || action === "managed-create" || action === "managed-revoke" ? "grants:write" : action === "list" ? "grants:read" :
         grantId === null ? "account:read" : method === "PUT" ? "grants:write" : "grants:read";
       if (!session.scopes.includes(scope)) return problem(403);
@@ -126,17 +166,18 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
         if (!bytes || bytes.length > 16_384) return problem(413);
         const input = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
         if (!input || typeof input !== "object" || Array.isArray(input) ||
-          Object.keys(input).some(key => !["sender", "category", "expiresAt"].includes(key)) ||
-          typeof input.sender !== "string" || (input.category !== null && typeof input.category !== "string") ||
+          Object.keys(input).some(key => !["sender", "category", "scope", "expiresAt"].includes(key)) ||
+          typeof input.sender !== "string" || (input.scope===undefined ? input.category!==null&&typeof input.category!=="string" :
+            input.category!==undefined||!input.scope||typeof input.scope!=="object"||Array.isArray(input.scope)) ||
           (input.expiresAt !== null && !Number.isSafeInteger(input.expiresAt))) return problem(400);
         if(action === "managed-create") {
           if(!await accounts.isManaged(session.account_id))return problem(403);
           const saved=await service.createOrReuse(session.canonical_address,input.sender,
-            {scope:input.category===null?{type:"uncategorized"}:{type:"categories",values:[input.category]},expiresAt:input.expiresAt});
+            {scope:input.scope ?? (input.category===null?{type:"uncategorized"}:{type:"categories",values:[input.category]}),expiresAt:input.expiresAt});
           return context.json({grantId:saved.payload.grant_id,revision:saved.payload.revision,status:saved.payload.status,digest:encodeBase64Url(saved.digest),publication:"durable"});
         }
         const payload = await service.prepareUserSignedGrant(session.canonical_address, input.sender,
-          { scope: input.category === null ? { type: "uncategorized" } : { type: "categories", values: [input.category] }, expiresAt: input.expiresAt });
+          { scope: input.scope ?? (input.category === null ? { type: "uncategorized" } : { type: "categories", values: [input.category] }), expiresAt: input.expiresAt });
         return context.json({ type: "hailp.grant-proposal", version: 1, grant: toDiagnosticJson("hail.grant", payload) });
       }
       if (action === "list") {
@@ -178,6 +219,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
         digest: encodeBase64Url(saved.digest), publication: "durable" });
     } catch (error) {
       if (error instanceof UserGrantError) return problem(error.status);
+      if (error instanceof BindingError) return problem(error.status);
       if (error instanceof HailCodecError || error instanceof SyntaxError) return problem(400);
       if (error instanceof CredentialConflictError || error instanceof GrantConflictError || error instanceof Error &&
         ("code" in error && error.code === "55000" || "errno" in error && error.errno === "55000")) {
@@ -188,6 +230,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
     }
   };
   app.all("/api/v1/account", context => handle(context, null));
+  app.all("/api/v1/account/binding",context=>handle(context,null,"binding"));
   app.all("/api/v1/account/messages",context=>handle(context,null,"send"));
   app.all("/api/v1/account/inbox",context=>handle(context,null,"inbox"));
   app.all("/api/v1/account/inbox/:sender/:messageId",context=>handle(context,context.req.param("messageId"),"read"));
@@ -197,6 +240,8 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
   app.all("/api/v1/account/grants/managed", context => handle(context,null,"managed-create"));
   app.all("/api/v1/account/grants/:grantId/revoke", context => handle(context,context.req.param("grantId"),"managed-revoke"));
   app.all("/api/v1/account/grants/proposals", context => handle(context, null, "proposal"));
+  app.all("/api/v1/account/grants/:grantId/proposals",context=>handle(context,context.req.param("grantId"),"update-proposal"));
+  app.all("/api/v1/account/grants/:grantId/update",context=>handle(context,context.req.param("grantId"),"managed-update"));
   app.all("/api/v1/account/grants", context => handle(context, null, "list"));
   app.all("/api/v1/account/grants/:grantId", context => handle(context, context.req.param("grantId")));
 }

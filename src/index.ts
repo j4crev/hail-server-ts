@@ -42,6 +42,7 @@ import { EnvelopeService } from "./envelopes/service.js";
 import { submitEnvelope } from "./envelopes/submission.js";
 import { AccountAccess } from "./accounts/access.js";
 import { assertPrivatePocRegistry } from "./migration/poc-profile.js";
+import { AccountBinding } from "./accounts/binding.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -162,6 +163,8 @@ const app = createApp(config, schemaRehearsal ? {
     onboarding:new PrivatePocOnboarding(database.sql,plc,new KeyEncryptor(config.keyEncryptionKey),config.plcDirectoryUrl,config.hailServiceBase),
     activation:new ActivationService(onboardingRepository,new AddressVerifier(plc,transport.fetch,transport.validateTarget),config.hailServiceBase,"public"),provider:config.publicOrigin}} : {}),
   accountApi: { accounts: new AccountApiRepository(database.sql), grants: grantRepository,
+    binding:new AccountBinding(database.sql,resolver,new KeyEncryptor(config.keyEncryptionKey),config.publicOrigin,
+      new AddressVerifier(plc,transport.fetch,transport.validateTarget)),
     messaging:new AccountMessaging(database.sql,new BodyRepository(database.sql),new EnvelopeRepository(database.sql),
       new EnvelopeService(onboardingRepository,grantRepository,new EnvelopeRepository(database.sql),new KeyEncryptor(config.keyEncryptionKey),resolver,config.hailServiceBase),
       (sender,id)=>submitEnvelope(sender,id,new EnvelopeRepository(database.sql),resolver,

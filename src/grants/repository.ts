@@ -5,6 +5,7 @@ import type { SQL } from "bun";
 import type {
   AuthoritativeGrantRevision1,
   AuthoritativeGrantRevocation,
+  AuthoritativeGrantUpdate,
   ClaimedPublicationResult,
   GrantConsentEvidence,
   GrantPublicationClaim,
@@ -13,6 +14,7 @@ import type {
   SignedGrantRevision,
   SignedGrantRevisionInput,
 } from "./store.js";
+import { restrictsAuthorization } from "./revision.js";
 
 export class GrantConflictError extends Error {}
 
@@ -212,6 +214,13 @@ export class GrantRepository implements GrantStore {
     return rows[0] ? grantFromRow(rows[0]) : null;
   }
 
+  async findRevisionByGrantId(grantId:string,revision:number):Promise<SignedGrantRevision|null> {
+    const rows=await this.sql<GrantRow[]>`SELECT ${this.sql.unsafe(GRANT_COLUMNS)} FROM grant_lineages AS lineage
+      JOIN grant_revisions AS revision ON revision.grant_id=lineage.grant_id
+      WHERE lineage.grant_id=${grantId} AND revision.revision=${revision}`;
+    return rows[0]?grantFromRow(rows[0]):null;
+  }
+
   async findReceivedForSender(grantId: string, senderDid: string): Promise<SignedGrantRevision | null> {
     const current = await this.findCurrentByGrantId(grantId);
     if (!current || current.payload.grantee !== senderDid) return null;
@@ -304,10 +313,14 @@ export class GrantRepository implements GrantStore {
   }
 
   async appendAuthoritativeRevocation(input: AuthoritativeGrantRevocation): Promise<void> {
+    if(input.revision.payload.status!=="revoked")throw new Error("Expected a signed terminal revision");
+    return this.appendAuthoritativeUpdate(input);
+  }
+
+  async appendAuthoritativeUpdate(input:AuthoritativeGrantUpdate):Promise<void> {
     const { revision } = input;
     checkedInput(revision, "grantor");
     if (
-      revision.payload.status !== "revoked" ||
       revision.payload.revision !== input.expectedCurrentRevision + 1 ||
       !revision.payload.previous ||
       !bytesEqual(revision.payload.previous, input.expectedCurrentDigest)
@@ -316,10 +329,21 @@ export class GrantRepository implements GrantStore {
     }
 
     await this.sql.begin(async (transaction) => {
+      await transaction`SELECT id FROM provider_accounts WHERE id=${revision.localAccountId} FOR UPDATE`;
+      const currentRows=await transaction<GrantRow[]>`SELECT ${transaction.unsafe(GRANT_COLUMNS)} FROM grant_lineages AS lineage
+        JOIN grant_revisions AS revision ON revision.grant_id=lineage.grant_id AND revision.revision=lineage.current_revision
+        WHERE lineage.grant_id=${revision.payload.grant_id} FOR UPDATE OF lineage`;
+      const current=currentRows[0]?grantFromRow(currentRows[0]):null;
+      if(!current||current.localAccountId!==revision.localAccountId||current.localRole!=="grantor"||
+        current.payload.status!=="active"||current.payload.issued_at!==revision.payload.issued_at)throw new GrantConflictError("Grant immutable/current state conflicts");
+      if(current.signingPublicKey!==revision.signingPublicKey)throw new GrantConflictError("Historical-key reconciliation required for signer changes");
+      if(restrictsAuthorization(current.payload,revision.payload)&&!isDeepStrictEqual(current.payload.consent_context,revision.payload.consent_context))throw new GrantConflictError("Restrictions must retain prior consent");
+      if(input.consent)assertConsent(revision.payload,input.consent);
+      else if(!restrictsAuthorization(current.payload,revision.payload)||!isDeepStrictEqual(current.payload.consent_context,revision.payload.consent_context))throw new GrantConflictError("Fresh consent evidence required");
       const updated = await transaction`
         UPDATE grant_lineages
         SET current_revision = ${revision.payload.revision},
-            current_digest = ${revision.digest}, current_status = 'revoked', updated_at = now()
+            current_digest = ${revision.digest}, current_status = ${revision.payload.status}, updated_at = now()
         WHERE grant_id = ${revision.payload.grant_id}
           AND local_account_id = ${revision.localAccountId}
           AND local_role = 'grantor'
@@ -338,9 +362,20 @@ export class GrantRepository implements GrantStore {
       `;
       if (updated.length !== 1) throw new GrantConflictError("Authoritative Grant revision conflict");
       await this.insertRevision(transaction, revision);
+      if(input.consent) {
+        const consent=input.consent;
+        await transaction`INSERT INTO grant_consent_evidence (grant_id,revision,grantee_address,binding_cose,binding_digest,
+          binding_plc_document,binding_plc_data,binding_plc_operation_log,binding_verified_at,profile_revision,profile_cose,profile_digest,
+          profile_plc_document,profile_plc_data,profile_plc_operation_log,profile_verified_at)
+          VALUES (${revision.payload.grant_id},${revision.payload.revision},${consent.address.address},${consent.address.representation},${consent.address.digest},
+            ${evidenceJson(consent.address.plcEvidence.document)}::jsonb,${evidenceJson(consent.address.plcEvidence.data)}::jsonb,${evidenceJson(consent.address.plcEvidence.log)}::jsonb,
+            ${consent.address.verifiedAt},${consent.senderProfile.profile.revision},${consent.senderProfile.representation},${consent.senderProfile.digest},
+            ${evidenceJson(consent.senderProfile.plcEvidence.document)}::jsonb,${evidenceJson(consent.senderProfile.plcEvidence.data)}::jsonb,
+            ${evidenceJson(consent.senderProfile.plcEvidence.log)}::jsonb,${consent.senderProfile.verifiedAt})`;
+      }
       const publications = await transaction`
         INSERT INTO grant_publications (grant_id, revision, destination_service_base)
-        SELECT ${revision.payload.grant_id}, ${revision.payload.revision}, destination_service_base
+        SELECT ${revision.payload.grant_id}, ${revision.payload.revision}, COALESCE(${input.destinationServiceBase ?? null},destination_service_base)
         FROM grant_publications
         WHERE grant_id = ${revision.payload.grant_id}
         ORDER BY revision
