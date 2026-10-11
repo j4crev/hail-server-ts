@@ -7,6 +7,9 @@ import type { TransferGrantSubmission } from "./grant-submission.js";
 import type { TransferRateLimit } from "./rate-limit.js";
 import type { TransferCancellationService } from "./cancellation.js";
 import type { TransferCancellationReceiver } from "./cancellation-receiver.js";
+import type { PrivatePocTransferCompletion } from "./poc-completion.js";
+import { decodeDeterministic } from "@hailproto/codec";
+import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { boundedTransferBody, parseInvitationWire, parseFinalRequestWire,
   parseRequestWire, parseCancellationWire, requestWire,
   TRANSFER_MEDIA_TYPE } from "./wire.js";
@@ -16,7 +19,28 @@ export function registerTransferRoutes(app: Hono, receiver: TransferInvitationRe
   publisher?: Pick<TransferFinalRequestPublisher, "publish">,
   grantSubmission?: TransferGrantSubmission, rateLimit?: TransferRateLimit,
   cancellation?: TransferCancellationService,
-  cancellationReceiver?: TransferCancellationReceiver): void {
+  cancellationReceiver?: TransferCancellationReceiver,completion?:PrivatePocTransferCompletion): void {
+  if(completion) {
+    app.post("/.well-known/hail/transfers/completions",async context=>{
+      if(rateLimit&&!await rateLimit.admit("request"))return new Response(null,{status:429});
+      if(context.req.header("Content-Type")!==TRANSFER_MEDIA_TYPE||context.req.header("Content-Encoding")!==undefined)return new Response(null,{status:415});
+      context.header("Cache-Control","no-store");
+      try {
+        const input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(await boundedTransferBody(context.req.raw.body,context.req.header("Content-Length")??null,100000000)));
+        return context.json(await completion.complete(input),200,{"Content-Type":TRANSFER_MEDIA_TYPE});
+      }catch{return new Response(null,{status:400,headers:{"Cache-Control":"no-store"}});}
+    });
+    if(fence)app.post("/.well-known/hail/transfers/retirements",async context=>{
+      if(rateLimit&&!await rateLimit.admit("request"))return new Response(null,{status:429});
+      if(context.req.header("Content-Type")!==TRANSFER_MEDIA_TYPE||context.req.header("Content-Encoding")!==undefined)return new Response(null,{status:415});
+      try {
+        const signed=parseRequestWire(await boundedTransferBody(context.req.raw.body,context.req.header("Content-Length")??null));
+        const receipt=decodeDeterministic(signed.payloadBytes) as {did:string;transfer_id:string};
+        if(typeof receipt.did!=="string"||!/^did:plc:[a-z2-7]{24}$/.test(receipt.did)||typeof receipt.transfer_id!=="string"||!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(receipt.transfer_id))throw new Error("Invalid retirement receipt subject");
+        await fence.retire(receipt.did,receipt.transfer_id,signed);return new Response(null,{status:204,headers:{"Cache-Control":"no-store"}});
+      }catch{return new Response(null,{status:400,headers:{"Cache-Control":"no-store"}});}
+    });
+  }
   let windowStarted = Date.now();
   let requests = 0;
   app.post("/.well-known/hail/transfers/invitations", async (context) => {

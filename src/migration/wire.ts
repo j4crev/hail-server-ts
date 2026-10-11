@@ -70,8 +70,8 @@ function parseWire(bytes: Uint8Array): unknown {
   return parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
 export async function boundedTransferBody(body: ReadableStream<Uint8Array> | null,
-  declared: string | null): Promise<Uint8Array> {
-  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > MAX_TRANSFER_WIRE_BYTES)) {
+  declared: string | null,maxBytes=MAX_TRANSFER_WIRE_BYTES): Promise<Uint8Array> {
+  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > maxBytes)) {
     throw new Error("Transfer HTTP body exceeds limit");
   }
   if (!body) throw new Error("Transfer HTTP body is missing");
@@ -83,7 +83,7 @@ export async function boundedTransferBody(body: ReadableStream<Uint8Array> | nul
       const { value, done } = await reader.read();
       if (done) break;
       total += value.length;
-      if (total > MAX_TRANSFER_WIRE_BYTES) throw new Error("Transfer HTTP body exceeds limit");
+      if (total > maxBytes) throw new Error("Transfer HTTP body exceeds limit");
       chunks.push(value);
     }
   } catch (error) { await reader.cancel().catch(() => {}); throw error; }

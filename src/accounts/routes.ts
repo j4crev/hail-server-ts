@@ -7,6 +7,7 @@ import { ALL_ACCOUNT_SCOPES, CredentialConflictError, type AccountApiRepository 
 import type { AccountMessaging } from "./messaging.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { BindingError, type AccountBinding } from "./binding.js";
+import { AccountTransferError,type AccountTransfer } from "./transfer.js";
 
 const GRANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BYTES = 262_144;
@@ -35,7 +36,7 @@ export async function accountRequestBytes(request: Request): Promise<Uint8Array 
 }
 
 export function registerAccountApiRoutes(app: Hono, accounts: AccountApiRepository,
-  grants: GrantRepository, service: GrantService, provider: string, messaging?:AccountMessaging, binding?:AccountBinding): void {
+  grants: GrantRepository, service: GrantService, provider: string, messaging?:AccountMessaging, binding?:AccountBinding,transfer?:AccountTransfer): void {
   let window = Date.now();
   let requests = 0;
   const handle = async (context: Context, grantId: string | null, action?: string):Promise<Response> => {
@@ -56,6 +57,17 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
       const query = new URL(context.req.url).searchParams;
       if (query.size && action !== "list" && action !== "inbox" && action !== "credential") return problem(400);
       const method = context.req.method;
+      if(action==="transfer-status"||action==="transfer-offer"||action==="transfer-cancel"||action==="transfer-export") {
+        if(!session.scopes.includes(action==="transfer-status"?"account:read":"account:write"))return problem(403);
+        if(!transfer)return problem(503);
+        if(action==="transfer-status"){if(method!=="GET")return problem(405);return context.json(await transfer.status(session));}
+        if(method!=="POST")return problem(405);
+        if(context.req.header("Content-Type")!=="application/json"||context.req.header("Content-Encoding")!==undefined)return problem(415);
+        const bytes=await accountRequestBytes(context.req.raw);if(!bytes||bytes.length>16384)return problem(413);
+        let input:Record<string,unknown>;try {input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes)) as Record<string,unknown>;
+          if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Invalid object");}catch{return problem(400);}
+        return context.json(action==="transfer-offer"?await transfer.offer(session,input):action==="transfer-export"?await transfer.exportSnapshot(session,input):await transfer.cancel(session,input));
+      }
       if(action==="update-proposal"||action==="managed-update") {
         if(!session.scopes.includes("grants:write"))return problem(403);
         if(method!=="POST")return problem(405);if(session.migration_state)return problem(409);
@@ -220,6 +232,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
     } catch (error) {
       if (error instanceof UserGrantError) return problem(error.status);
       if (error instanceof BindingError) return problem(error.status);
+      if (error instanceof AccountTransferError) return problem(error.status);
       if (error instanceof HailCodecError || error instanceof SyntaxError) return problem(400);
       if (error instanceof CredentialConflictError || error instanceof GrantConflictError || error instanceof Error &&
         ("code" in error && error.code === "55000" || "errno" in error && error.errno === "55000")) {
@@ -230,6 +243,10 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
     }
   };
   app.all("/api/v1/account", context => handle(context, null));
+  app.all("/api/v1/account/transfers",context=>handle(context,null,"transfer-status"));
+  app.all("/api/v1/account/transfers/offer",context=>handle(context,null,"transfer-offer"));
+  app.all("/api/v1/account/transfers/cancel",context=>handle(context,null,"transfer-cancel"));
+  app.all("/api/v1/account/transfers/export",context=>handle(context,null,"transfer-export"));
   app.all("/api/v1/account/binding",context=>handle(context,null,"binding"));
   app.all("/api/v1/account/messages",context=>handle(context,null,"send"));
   app.all("/api/v1/account/inbox",context=>handle(context,null,"inbox"));

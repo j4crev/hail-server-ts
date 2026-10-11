@@ -33,6 +33,8 @@ import { registerAccountAccess } from "./accounts/access-routes.js";
 import type { AccountAccess } from "./accounts/access.js";
 import type { SQL } from "bun";
 import type { AccountBinding } from "./accounts/binding.js";
+import type { AccountTransfer } from "./accounts/transfer.js";
+import type { PrivatePocTransferCompletion } from "./migration/poc-completion.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -55,7 +57,8 @@ export interface AppDependencies {
   transferRateLimit?: TransferRateLimit;
   transferCancellation?: TransferCancellationService;
   transferCancellationReceiver?: TransferCancellationReceiver;
-  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging; binding?:AccountBinding };
+  transferCompletion?:PrivatePocTransferCompletion;
+  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging; binding?:AccountBinding;transfer?:AccountTransfer };
   selfServiceOnboarding?: SelfServiceOnboarding;
   accountAccess?: { access: AccountAccess; sql: SQL };
 }
@@ -76,8 +79,8 @@ export function createApp(
   if (dependencies.accountAccess) registerAccountAccess(app, dependencies.accountAccess.access, dependencies.accountAccess.sql);
 
   if (dependencies.accountApi) {
-    const { accounts, grants, service, messaging, binding } = dependencies.accountApi;
-    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding);
+    const { accounts, grants, service, messaging, binding,transfer } = dependencies.accountApi;
+    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding,transfer);
   }
 
   if (dependencies.discoveryStore) {
@@ -97,7 +100,7 @@ export function createApp(
   if (dependencies.transferInvitationReceiver) registerTransferRoutes(app, dependencies.transferInvitationReceiver,
     dependencies.transferAddressReservation, dependencies.migrationFence, dependencies.transferFinalRequestPublisher,
     dependencies.transferGrantSubmission, dependencies.transferRateLimit,
-    dependencies.transferCancellation, dependencies.transferCancellationReceiver);
+    dependencies.transferCancellation, dependencies.transferCancellationReceiver,dependencies.transferCompletion);
 
   app.get("/health/live", (context) =>
     context.json({

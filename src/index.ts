@@ -43,6 +43,13 @@ import { submitEnvelope } from "./envelopes/submission.js";
 import { AccountAccess } from "./accounts/access.js";
 import { assertPrivatePocRegistry } from "./migration/poc-profile.js";
 import { AccountBinding } from "./accounts/binding.js";
+import { AccountTransfer } from "./accounts/transfer.js";
+import { MigrationTransferService } from "./migration/transfer.js";
+import { PrivatePocTransferCompletion } from "./migration/poc-completion.js";
+import { PrivatePocPlcSubmission } from "./migration/poc-plc-submission.js";
+import { PrivatePocCutoverGate } from "./migration/poc-cutover-gate.js";
+import { PrivatePocAddressPublication } from "./migration/poc-address-publication.js";
+import { PortableMigrationActivation } from "./migration/activation.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -76,6 +83,7 @@ const transferRateLimit = new TransferRateLimit(database.sql);
 const transferCleanup = new TransferCleanup(database.sql, transferRateLimit);
 const schemaRehearsal = process.env.POC_SCHEMA_REHEARSAL === "true";
 if (!schemaRehearsal && process.env.POC_ACCOUNT_ACCESS === "true") assertPrivatePocRegistry(config.plcDirectoryUrl, config.hailServiceBase);
+if (!schemaRehearsal && process.env.POC_SELF_SERVICE_TRANSFER === "true") assertPrivatePocRegistry(config.plcDirectoryUrl, config.hailServiceBase);
 if (schemaRehearsal && (config.plcDirectoryUrl !== "http://plc:2582" ||
   !config.databaseUrl.endsWith("/hail_private_stage"))) {
   throw new Error("POC schema rehearsal must use the internal PLC and isolated database clone");
@@ -152,6 +160,16 @@ const checkReadiness = async () => {
   await Promise.all([database.ping(), plc.health()]);
   return { ready: true };
 };
+let transferCompletion:PrivatePocTransferCompletion|undefined;
+if(!schemaRehearsal&&process.env.POC_SELF_SERVICE_TRANSFER==="true") {
+  const encryptor=new KeyEncryptor(config.keyEncryptionKey),gate=new PrivatePocCutoverGate(database.sql,
+    {origin:config.plcDirectoryUrl,resolver,audit:did=>plc.getAuditableLog(did)},config.plcDirectoryUrl,config.hailServiceBase);
+  transferCompletion=new PrivatePocTransferCompletion(database.sql,new MigrationTransferService(database.sql,onboardingRepository,encryptor,resolver,config.hailServiceBase),
+    new PrivatePocPlcSubmission(database.sql,plc,config.plcDirectoryUrl,config.hailServiceBase),
+    new PrivatePocAddressPublication(database.sql,resolver,gate,config.plcDirectoryUrl,config.hailServiceBase),
+    new PortableMigrationActivation(database.sql,encryptor,resolver,gate,new AddressVerifier(plc,transport.fetch,transport.validateTarget),
+      config.hailServiceBase,config.plcDirectoryUrl,undefined,"private-poc"),config.hailServiceBase);
+}
 const app = createApp(config, schemaRehearsal ? {
   discoveryStore: onboardingRepository,
   senderProfileStore: onboardingRepository,
@@ -163,6 +181,12 @@ const app = createApp(config, schemaRehearsal ? {
     onboarding:new PrivatePocOnboarding(database.sql,plc,new KeyEncryptor(config.keyEncryptionKey),config.plcDirectoryUrl,config.hailServiceBase),
     activation:new ActivationService(onboardingRepository,new AddressVerifier(plc,transport.fetch,transport.validateTarget),config.hailServiceBase,"public"),provider:config.publicOrigin}} : {}),
   accountApi: { accounts: new AccountApiRepository(database.sql), grants: grantRepository,
+    ...(process.env.POC_SELF_SERVICE_TRANSFER==="true"?{transfer:new AccountTransfer(database.sql,
+      new TransferGrantSubmission(database.sql,resolver,config.hailServiceBase,onboardingRepository,new KeyEncryptor(config.keyEncryptionKey),
+        new TransferInvitationService(database.sql,resolver,config.hailServiceBase),invitationDelivery,transferRateLimit),
+      new TransferCancellationService(database.sql,resolver,config.hailServiceBase,onboardingRepository,new KeyEncryptor(config.keyEncryptionKey)),config.publicOrigin,
+      {fence:new MigrationFenceService(database.sql,resolver,config.hailServiceBase),snapshots:new MigrationTransferService(database.sql,onboardingRepository,
+        new KeyEncryptor(config.keyEncryptionKey),resolver,config.hailServiceBase)})}:{}),
     binding:new AccountBinding(database.sql,resolver,new KeyEncryptor(config.keyEncryptionKey),config.publicOrigin,
       new AddressVerifier(plc,transport.fetch,transport.validateTarget)),
     messaging:new AccountMessaging(database.sql,new BodyRepository(database.sql),new EnvelopeRepository(database.sql),
@@ -201,6 +225,7 @@ const app = createApp(config, schemaRehearsal ? {
   transferCancellation: new TransferCancellationService(database.sql, resolver, config.hailServiceBase,
     onboardingRepository, new KeyEncryptor(config.keyEncryptionKey)),
   transferCancellationReceiver: new TransferCancellationReceiver(database.sql, resolver, config.hailServiceBase),
+  ...(transferCompletion?{transferCompletion}:{}),
   checkReadiness,
 });
 

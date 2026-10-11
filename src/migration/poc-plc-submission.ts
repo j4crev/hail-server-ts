@@ -5,6 +5,7 @@ import type { PlcDirectoryClient } from "../plc/client.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { assertPrivatePocRegistry } from "./poc-profile.js";
 import { validateTransferManifest } from "./transfer.js";
+import { verifyPortableMigrationConsent } from "./consent.js";
 
 export class PrivatePocPlcSubmission {
   constructor(private readonly sql: SQL, private readonly plc: PlcDirectoryClient,
@@ -14,8 +15,8 @@ export class PrivatePocPlcSubmission {
 
   async submit(transferId: string): Promise<string> {
     const rows = await this.sql<{ did: string; state: string; manifest_bytes: Uint8Array;
-      signed_plc_operation_bytes: Uint8Array }[]>`
-      SELECT did, state, manifest_bytes, signed_plc_operation_bytes
+      signed_plc_operation_bytes: Uint8Array;user_consent_payload:Uint8Array;user_consent_signature:Uint8Array;user_identity_public_key:string }[]>`
+      SELECT did, state, manifest_bytes, signed_plc_operation_bytes,user_consent_payload,user_consent_signature,user_identity_public_key
       FROM pending_migration_imports WHERE transfer_id = ${transferId}`;
     const row = rows[0];
     if (!row || row.state !== "staged") throw new Error("POC PLC write requires an inactive staged import");
@@ -32,6 +33,7 @@ export class PrivatePocPlcSubmission {
     if (!last) throw new Error("Private PLC has no existing DID operation");
     const current = (await cidForCbor(last)).toString();
     if (current === expectedCid) return expectedCid;
+    await verifyPortableMigrationConsent({payloadBytes:row.user_consent_payload,signature:row.user_consent_signature},row.user_identity_public_key,Math.floor(Date.now()/1000));
     if (op.prev !== current || !await validateOperationLog(row.did, [...log, op])) {
       throw new Error("Private PLC changed after user approval; cutover requires new user consent");
     }
