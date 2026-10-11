@@ -6,7 +6,7 @@ published.
 
 ## Start here: current deployment
 
-As of October 9, 2026, both provider databases are at migration **34**. The
+As of October 10, 2026 (UTC), both provider databases are at migration **35**. The
 POC supports message/reply delivery and fresh user-key-held private-PLC DID
 transfers, including pending-message continuity. Original Alice/Bob accounts
 remain custodial and cannot be used as portable migration sources.
@@ -31,9 +31,15 @@ all pre-existing table data and rolled providers individually. Both custody
 profiles on both HTTPS origins passed expired-credential recovery, exact retries,
 rotation, inventory and narrower issuance. Original PLC genesis logs were unchanged.
 
+The [milestone-4 release](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone4-release.md)
+rehearsed 34→35 on restored deployment copies and rolled providers individually.
+Both custody profiles on both HTTPS origins passed binding renewal, scope and
+Grant revision/consent checks; all five cross-provider revisions were acknowledged.
+PLC genesis logs were unchanged. Historical-key execution remains disabled.
+
 The current VPS provider configuration uses `compose.cli-release.yaml` alongside
-the base Compose file, pins `hail-server-ts:poc-lifecycle-20261009`, points its
-build context at `/opt/hail-lifecycle-release-20261009`, and explicitly enables
+the base Compose file, pins `hail-server-ts:poc-milestone4-20261010`, points its
+build context at `/opt/hail-milestone4-release-20261010`, and explicitly enables
 private-PLC signup and owner access (`POC_SELF_SERVICE_ONBOARDING=true`,
 `POC_ACCOUNT_ACCESS=true`). Include the overlay for live stack operations:
 
@@ -323,7 +329,7 @@ returns the existing tombstone without creating another revision.
 
 The envelope and status slice adds forward-only provider migrations 8 through
 11 in the original release; the current checkout applies all migrations
-through **34** with the account-access lifecycle slice. Back up **both** provider databases before replacing either provider. From
+through **35** with the renewal/revision slice. Back up **both** provider databases before replacing either provider. From
 `/opt/hail-poc/hail-server-ts/deploy/poc` on the VPS, as the administrator:
 
 ```bash
@@ -361,7 +367,7 @@ docker compose --env-file .env -f compose.yaml exec -T dev-db \
   psql -U hail -d hail -Atc 'SELECT max(version) FROM schema_migrations;'
 ```
 
-For the lifecycle checkout, both migration queries must print `34`; the
+For the milestone-4 checkout, both migration queries must print `35`; the
 recorded live continuity release is `31` and the original delivery-only
 release printed `11`. Check HTTPS readiness from outside the
 VPS and examine provider logs before sending. Prefer forward repair after a
@@ -429,7 +435,7 @@ Migration 12 adds single-use reply invitations and explicit authorization
 lineage to sent and received envelopes. It is already included in the current
 migration-31 release and the additive migrations 32–33 account API. For an upgrade, use the backup and one-provider-at-a-time
 rollout procedure above; the original reply-only release reported version
-`12`, while a fresh lifecycle install reports `34`. Confirm both public readiness
+`12`, while a fresh milestone-4 install reports `35`. Confirm both public readiness
 endpoints and provider logs are healthy before the reply walkthrough.
 Existing Grant envelopes and messages remain valid.
 

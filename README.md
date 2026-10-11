@@ -13,8 +13,8 @@ The deployed private-PLC POC supports Grant-authorized detached-body delivery,
 signed terminal status, revocation, single-use replies and user-authorized
 provider transfer with pending-message continuity. The October 9 CLI release adds
 private-PLC self-service signup and the account API; provider databases are at
-migration 34, including verified owner-key access recovery and credential
-inventory/scoped issuance/rotation. A separate same-VPS monitor proves signed-alert functionality,
+migration 35, including owner-key recovery, scoped credentials/rotation,
+provider-domain binding renewal and stable-key Grant updates. A separate same-VPS monitor proves signed-alert functionality,
 but is not independent production monitoring.
 
 - [Provider deployment and delivery runbook](deploy/poc/README.md).
@@ -103,11 +103,102 @@ lost-response revocation retry, expired/revoked credentials and rejection of
 redirects/insecure credential files. The user signer and vault remain outside
 the provider; no user identity private key is stored there.
 
+### Owner-controlled transfer Offer/status/cancellation (local milestone 5)
+
+`POC_SELF_SERVICE_TRANSFER=true` enables a reference account-API slice only on
+the pinned private PLC profile. It adds no migration and is not deployed to the
+POC hosts. It reuses the existing signed invitation, destination-origin Offer
+delivery and no-fence cancellation services:
+
+| Operation | Scope | Result |
+| --- | --- | --- |
+| `GET /api/v1/account/transfers` | `account:read` | Source-retained phase, nonce/destination/expiry, origin confirmation and exact Offer |
+| `POST /api/v1/account/transfers/offer` | `account:write` | Retain exact owner-signed approval, attempt existing invitation delivery, return current status |
+| `POST /api/v1/account/transfers/cancel` | `account:write` | Retain exact owner-signed pre-fence cancellation and return source-signed receipt/public messaging key |
+| `POST /api/v1/account/transfers/export` | `account:write` | Export/retrieve an immutable source-signed snapshot for the exact authenticated fenced/exported transfer ID |
+
+Mutations accept an exact JSON `{payload, signature}` base64url record with no
+content coding, at most 16 KiB wire/4 KiB signed payload. The authenticated
+account must be active, publicly verified and owner-controlled, without a
+provider-held identity key or managed custody evidence; the current database
+credential must retain write scope. The signed subject must match that account.
+Any source fence blocks Offer/cancellation mutations. Export explicitly requires
+a matching fenced/exported transfer, never a fresh or retired source, and advances
+the source to exported through the existing snapshot service. Its request is
+`{transferId}`; its result is the existing `hail.portable-migration-transfer` v2
+container, with a manifest bounded at 64 MiB and no private provider key material
+or exported account credentials. Retrying after a lost response returns the exact
+stored signed snapshot. Status remains a read of retained state,
+including unresolved expiry and cancelled/fenced/exported/retired history.
+
+Offer preparation does not select an address or fence the source. The client now
+uses the existing signed destination reservation endpoint for `transfer select`,
+which can fence the source, with exact retained retries. No source
+bearer is sent there. The source cancellation endpoint returns a no-fence receipt;
+the client retains it and forwards signed evidence to the existing destination
+cancellation endpoint, reporting completion only after target acknowledgement.
+The client's offline `transfer sign-cutover` now reuses the full-vault private-POC
+signer, binding exact operation/consent/binding output paths in retained state.
+`transfer complete` now uses private-POC signed completion/retirement endpoints
+to stage, submit the exact PLC operation, publish/verify the binding, activate and
+retire. Destination credentials use the existing explicit owner-login API; source
+tokens are not exported or forwarded.
+
+| Reference private-POC operation | Authorization | Result |
+| --- | --- | --- |
+| `POST /.well-known/hail/transfers/completions` | Exact source snapshot plus owner-signed consent/operation/binding | Stage or resume exact retained artifacts, submit cutover, verify address and activate; signed activation receipt |
+| `POST /.well-known/hail/transfers/retirements` | Destination-signed activation receipt verified against current PLC and source fence | Exact idempotent source retirement, HTTP 204 |
+
+Both endpoints require `POC_SELF_SERVICE_TRANSFER=true` on the pinned private PLC
+profile and `application/hail-transfer+json`, without content coding. Completion
+accepts `{snapshot, consent: {payload, signature}, operation, binding}` with
+base64url operation/binding bytes, at most 100 MB JSON and a 64 MiB manifest;
+retirement accepts an exact `{payload, signature}` receipt within the existing
+16 KiB wire/4 KiB payload limits. These are reference-provider adapters, not new
+standardized federation operations. Existing transfer rate limits apply.
+
+First staging revalidates current source PLC, user consent, source signature,
+reserved address and destination key ownership through existing services. Known
+staged/active imports resume only when all signed artifacts match retained bytes,
+including consent/signature and binding. This preserves retries after PLC movement
+and accepted consent expiry; an expired consent cannot initiate a fresh PLC write.
+An already observed exact operation can recover its response without a new write.
+Active retries revalidate current destination authority and recover the exact
+signed activation receipt. Source retirement verifies that receipt against current
+destination PLC authority and the exported snapshot, retaining it durably. A failed
+step never releases the source fence or reservation. No user private key or bearer
+credential is accepted as replacement for these signatures.
+See the [client workflow](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/cli-workflows.md#owner-controlled-transfer-offer-review-and-source-cancellation).
+
+`test/transfer-cancellation.integration.test.ts` covers authenticated route
+scope/account isolation, exact Offer retries, unresolved expiry, source fences,
+credential revocation and signed cancellation receipt/status, including client
+retry after a lost target cleanup acknowledgement. The private-POC migration test
+now exercises client Offer/selection with actual protocol routes and PostgreSQL,
+including lost selection and export responses after durable source transitions,
+before proving actual `hailp` exact cutover signing, legacy signer compatibility,
+API-driven completion/retirement and fresh destination login. Changed signing
+paths and tampered snapshots fail. Completion covers address verification failure,
+expired-consent fresh-write rejection, lost PLC/activation/retirement responses,
+exact active retries after consent expiry and changed-artifact rejection. Adjacent
+fence/transfer tests retain message/status/outbox continuity proof.
+These new transfer tests use in-process
+HTTP route transport; the account-API TLS tests cover HTTPS CLI transport.
+
+The [milestone-5 custody/return design](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/custody-transitions.md)
+defines owner-controlled ↔ managed transitions, removal of outgoing managed
+identity authority, historical evidence and lifecycle generations. These paths
+remain disabled. Current DID-keyed fences/account uniqueness and insert-only
+activation do not support returning to a former provider. Post-export import
+invalidation alone cannot cancel a signed PLC operation; the design requires
+protective owner-signed PLC state before never-active source resumption, or a
+latest-state reverse transfer after destination activation.
+
 ## API-first account management direction
 
-### Active Grant revisions (local, not deployed)
+### Active Grant revisions
 
-The next slice adds active signed Grant updates through owner proposals/import
+The deployed slice adds active signed Grant updates through owner proposals/import
 and explicit managed signing, plus multiple selected categories without wildcards.
 Expansion, scope switches, expiry extension and consent refresh reverify exact
 current address/profile evidence; restrictions preserve consent without sender
@@ -121,13 +212,15 @@ are held pending reviewed historical-key reconciliation. See the
 [revision contract](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/grant-revisions.md)
 and [key decision](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/grant-key-reconciliation.md).
 
-### Address Binding renewal (local migration 35)
+### Address Binding renewal (migration 35)
 
-The next local slice adds `GET/POST /api/v1/account/binding` and
+The deployed slice adds `GET/POST /api/v1/account/binding` and
 `hailp binding show/renew`. Reading exposes selected signed expiry and seven-day
 reminder metadata; renewal needs deliberate `account:write` authority, current
 identity/service ownership and an active/public account. Migration 35 expands
-the scope constraint without upgrading existing credentials. This is not deployed.
+the scope constraint without upgrading existing credentials. Both custody
+profiles passed real HTTPS renewal/retry/history proof on both POC origins;
+see the [release evidence](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone4-release.md).
 
 Provider-domain renewals retain the 90-day maximum and immutable signed history.
 Hosting commits before compare-and-select publication; exact retries repair
