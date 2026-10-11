@@ -57,6 +57,13 @@ destination after transfer.
 
 ### HTTP contract
 
+The consolidated [reference account API v1 / hailp CLI contract](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/cli-contract.md)
+defines compatibility, output/error semantics and bounded read convenience.
+The client version is 0.1.0 and its JSON adds `cliContractVersion: 1`; provider
+response shapes and API paths remain unchanged. Command-specific help, deliberate
+origin/account assertions and a compiled executable are documented in the
+[developer workflows](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/cli-workflows.md#developer-and-agent-operation-contract-v1).
+
 Use `Authorization: Bearer <token>` over the configured provider HTTPS origin.
 These paths are the reference provider's client API, not standardized Hail
 federation operations:

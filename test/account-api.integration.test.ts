@@ -365,6 +365,12 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
     expect(all.find(row => row.credentialId === expired.credentialId).status).toBe("expired");
     for (const row of all) expect(Object.keys(row)).toEqual(["credentialId", "scopes", "createdAt", "expiresAt", "revokedAt", "status"]);
     expect(inventory.stdout + following.stdout).not.toContain(manager.token);
+    const combined = await cli(["credential", "list", "--pages", "2", "--provider", origin, "--account-id", ownerId], "credential-manager.json");
+    expect(combined.exit, combined.stderr).toBe(0);
+    expect(JSON.parse(combined.stdout)).toMatchObject({ cliContractVersion: 1, credentials: all, next: null });
+    const mismatched = await cli(["credential", "list", "--provider", "https://other.example.com"], "credential-manager.json");
+    expect(mismatched.exit).toBe(1); expect(mismatched.stdout).toBe("");
+    expect(JSON.parse(mismatched.stderr).error.code).toBe("SELECTION_MISMATCH");
     expect((await app.request(`${endpoint}?after=not-a-uuid`, { headers: { Authorization: `Bearer ${manager.token}` } })).status).toBe(400);
     expect((await app.request(`${endpoint}?account=${otherId}`, { headers: { Authorization: `Bearer ${manager.token}` } })).status).toBe(400);
   });
@@ -389,7 +395,13 @@ integration("authenticated account API and real hailp HTTPS CLI", () => {
     const sent=await cli(args,"message-sender.credential.json");if(sent.exit)throw new Error(`${sent.stderr} ${String(messageError)}`);
     const id=JSON.parse(sent.stdout).messageId;
     const retry=await cli(args,"message-sender.credential.json");expect(retry.exit).toBe(0);expect(JSON.parse(retry.stdout).messageId).toBe(id);
-    const inbox=await cli(["inbox","list"],"message-owner.credential.json");expect(inbox.exit).toBe(0);expect(JSON.parse(inbox.stdout).messages).toHaveLength(1);
+    // Delivery happened in the fixture, but no authenticated status was retained
+    // by its sender. Waiting must not infer acceptance from the send response.
+    const waited=await cli(["message","status",id,"--wait","1","--interval","1"],"message-sender.credential.json");
+    expect(waited.exit,waited.stderr).toBe(0);
+    expect(JSON.parse(waited.stdout)).toMatchObject({cliContractVersion:1,messageId:id,state:"indeterminate",revision:null,
+      wait:{completed:false,timedOut:true}});
+    const inbox=await cli(["inbox","list","--pages","2"],"message-owner.credential.json");expect(inbox.exit).toBe(0);expect(JSON.parse(inbox.stdout).messages).toHaveLength(1);
     const read=await cli(["inbox","show",senderDid,id],"message-owner.credential.json");if(read.exit)throw new Error(read.stderr);
     expect(JSON.parse(read.stdout).body.blocks[0].children[0].text).toBe("CLI message");
     expect(JSON.parse(read.stdout).reply.allowed).toBe(true);
