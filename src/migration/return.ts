@@ -31,7 +31,11 @@ export async function validateReturningEvidence(sql:SQL,manifest:TransferManifes
     const name=table as keyof typeof immutable;
     for(const row of previous.tables[name]) {
       const current=manifest.tables[name].find(candidate=>keys.every(key=>candidate[key]===row[key]));
-      if(!current||!isDeepStrictEqual(current,row))throw new Error(`Returning snapshot loses or conflicts with retained ${table} history`);
+      const expected={...row},actual=current?{...current}:null;
+      // Receiver-local arrival time is not part of the signed Grant checkpoint.
+      // The old observation remains immutable in the archived export.
+      if(name==="grant_revisions"){delete expected.received_at;if(actual)delete actual.received_at;}
+      if(!actual||!isDeepStrictEqual(actual,expected))throw new Error(`Returning snapshot loses or conflicts with retained ${table} history`);
     }
   }
   for(const row of previous.tables.grant_lineages) {

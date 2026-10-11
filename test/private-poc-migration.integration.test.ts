@@ -427,6 +427,9 @@ integration("private PLC transfer between disposable POC providers", () => {
     const betaPending=(await withFreshServingGenerations(target.sql,()=>betaDelivery.claimDue()))!;expect(betaPending.messageId).toBe(secondMessage.message_id);
     const betaGrant=(await withFreshServingGenerations(target.sql,()=>new GrantRepository(target.sql).claimDuePublication(60000)))!;
     expect(betaGrant.grant.payload.grant_id).toBe(grant.grant_id);
+    // A destination's pre-existing grantee replica has its own arrival time,
+    // even when the COSE/digest/signer checkpoint is identical.
+    await withFreshServingGenerations(target.sql,async()=>{await target.sql`UPDATE grant_revisions SET received_at=received_at+interval '1 second' WHERE grant_id=${grant.grant_id} AND revision=1`;});
     const acknowledgedEtag=`"${encodeBase64Url(betaGrant.grant.digest)}"`;
     await withFreshServingGenerations(target.sql,()=>new GrantRepository(target.sql).acknowledgePublication({grantId:grant.grant_id,revision:1,leaseToken:betaGrant.leaseToken,etag:acknowledgedEtag,httpStatus:201}));
 
