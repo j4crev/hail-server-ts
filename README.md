@@ -194,6 +194,85 @@ invalidation alone cannot cancel a signed PLC operation; the design requires
 protective owner-signed PLC state before never-active source resumption, or a
 latest-state reverse transfer after destination activation.
 
+### Serving/history foundation (local migration 36)
+
+Migration 36 adds separate generation-1 account metadata and append-only retired
+transfer history. It changes no existing signed/account/credential row shape;
+old v2 snapshot imports and bearer authentication remain compatible. Existing
+retired transfers are backfilled, and future retirements archive exact
+fence/export/consumed-authorization records in the same transaction. History
+survives working-row cleanup and rejects update/delete/truncation or conflicting
+archival retries. A matching retained export is required for retirement.
+
+Generation advancement is deliberately constrained to `1` until credentials,
+challenges and all admitted/leased workers enforce generation ownership. This
+does not enable return transfers or release any source fence. Live hosts still
+run migration 35; the new expansion has not been deployed.
+
+The guarded rollback script is
+`migrations/rollback/0036_serving_lifecycle_history.sql`. It requires no later
+migration and exact redundancy with all legacy fence/export/authorization rows
+before dropping only the additive schema. It refuses to discard the sole archive
+copy. Upgrade/repeat/rollback/re-upgrade preservation and legacy import/auth checks
+pass alongside actual signed retirement archival and adjacent transfer/access
+regressions: 32 focused tests on disposable databases. See the
+[migration evidence and next stage](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/lifecycle-history-migration.md).
+
+### Generation-bound return (local migrations 37/38)
+
+Migration 37 binds credentials, owner-login challenges and worker lease tokens
+in side tables without altering signed v2/account/challenge shapes. Native
+transaction-local admission is checked before SQL reads and at the existing
+account-row write guard. HTTP and worker entry points retain their admitted
+generation through asynchronous work; old tokens/challenges/claims cannot gain
+new authority because a logical account ID becomes active again.
+
+Migration 38 archives incoming import/invitation/reservation/public-key evidence
+when an imported account retires, omitting prepared private ciphertext. Together
+with migration 36's outgoing archive, this permits exact retired-slot recycling
+without erasing history. Returning materialization requires the old retired
+checkpoint and the latest signed source snapshot, preserves immutable and
+delivery/reply/outbox checkpoints, revokes old credentials and advances one
+generation under the account lock. Shared collocated Grant ownership is retained;
+conflicts roll the whole transaction back. Attempts/deadlines/retry schedules
+survive, but old lease tokens do not.
+
+`POC_SELF_SERVICE_RETURN=true` requires `POC_SELF_SERVICE_TRANSFER=true` on the
+pinned private PLC. It enables only owner-controlled returns preserving the
+same identity/recovery keys, with a fresh available username. Upgrade all
+serving processes/workers before enabling it; mixed-version operation remains
+generation-1 only. The existing `hailp account transfer …` flow is reused, followed
+by explicit fresh destination login. These gates/migrations are not deployed.
+
+The native admission adapter currently captures an O(accounts) provider-wide
+generation vector. An unrelated advancement may conservatively invalidate a
+concurrent job; per-DID capture is the throughput upgrade path.
+`migrations/rollback/0037_generation_admission.sql` rolls back 38/37 only before
+advancement and while incoming archive records retain exact legacy copies. It
+refuses rollback after generation 2 or detachment; application downgrade after
+advancement is not supported. See
+[return proof and boundaries](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/generation-bound-return.md).
+
+### Never-active post-export recovery (internal migration 39)
+
+`PrivatePocTransferAbandonment` implements independent owner-recovery approvals,
+staged-target invalidation, protective source PLC verification, target release
+and exact source resumption. It is not registered as public routes. An active
+destination is rejected and requires latest-state reverse transfer. Submission,
+invalidation, publication and activation share the import-row serialization
+point; a protective owner-signed successor prevents delayed external PLC replay.
+
+Migration 39 retains signed coordination receipts and original source/target
+evidence, plus retired observation history before old import slots are recycled.
+Nonce tombstones prevent old grants/invitations reopening the abandoned transfer.
+Resumption preserves accepted state, revokes old credentials/leases and advances
+the source generation only after current protective authority, target release
+and source binding verify. Unknown PLC changes or missing counterpart/binding
+proof leave the source fenced. Exact receipts support restart/lost responses.
+The guarded rollback refuses accepted abandonment or sole-copy observation loss.
+No rollout or public-API enabling was performed. See the
+[private recovery proof](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/post-export-recovery.md).
+
 ## API-first account management direction
 
 ### Active Grant revisions
