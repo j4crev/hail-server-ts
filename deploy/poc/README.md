@@ -6,7 +6,7 @@ published.
 
 ## Start here: current deployment
 
-As of October 10, 2026 (UTC), both provider databases are at migration **35**. The
+As of October 11, 2026 (UTC), both provider databases are at migration **39**. The
 POC supports message/reply delivery and fresh user-key-held private-PLC DID
 transfers, including pending-message continuity. Original Alice/Bob accounts
 remain custodial and cannot be used as portable migration sources.
@@ -37,11 +37,23 @@ Both custody profiles on both HTTPS origins passed binding renewal, scope and
 Grant revision/consent checks; all five cross-provider revisions were acknowledged.
 PLC genesis logs were unchanged. Historical-key execution remains disabled.
 
+The [milestone-5 release](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone5-release.md)
+rehearsed 35→39, guarded rollback to 35 and re-upgrade to 39 on restored copies,
+preserving every pre-existing table. Both generation-aware runtimes were rolled
+before transfer/return gates were enabled. Real HTTPS app→dev→app verification
+preserved delivered messages, terminal acknowledgements and retired history,
+advanced the returning account to generation 2 and rejected its old credential.
+A receiver-local Grant arrival-time mismatch found by that round trip was fixed
+without changing any signed checkpoint or re-signing the retained cutover.
+Internal abandonment has no public route. After generation advancement, do not
+downgrade to generation-unaware code or treat schema rollback as ownership recovery.
+
 The current VPS provider configuration uses `compose.cli-release.yaml` alongside
-the base Compose file, pins `hail-server-ts:poc-milestone4-20261010`, points its
-build context at `/opt/hail-milestone4-release-20261010`, and explicitly enables
+the base Compose file, pins `hail-server-ts:poc-milestone5-20261011-fix1`, points its
+build context at `/opt/hail-milestone5-release-20261011-fix1`, and explicitly enables
 private-PLC signup and owner access (`POC_SELF_SERVICE_ONBOARDING=true`,
-`POC_ACCOUNT_ACCESS=true`). Include the overlay for live stack operations:
+`POC_ACCOUNT_ACCESS=true`), transfer and stable-owner return
+(`POC_SELF_SERVICE_TRANSFER=true`, `POC_SELF_SERVICE_RETURN=true`). Include the overlay for live stack operations:
 
 ```bash
 docker compose --env-file .env -f compose.yaml -f compose.cli-release.yaml ps

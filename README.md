@@ -106,8 +106,9 @@ the provider; no user identity private key is stored there.
 ### Owner-controlled transfer Offer/status/cancellation (local milestone 5)
 
 `POC_SELF_SERVICE_TRANSFER=true` enables a reference account-API slice only on
-the pinned private PLC profile. It adds no migration and is not deployed to the
-POC hosts. It reuses the existing signed invitation, destination-origin Offer
+the pinned private PLC profile. It is deployed to both migration-39 POC hosts;
+see [milestone-5 release evidence](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone5-release.md).
+It reuses the existing signed invitation, destination-origin Offer
 delivery and no-fence cancellation services:
 
 | Operation | Scope | Result |
@@ -206,8 +207,9 @@ archival retries. A matching retained export is required for retirement.
 
 Generation advancement is deliberately constrained to `1` until credentials,
 challenges and all admitted/leased workers enforce generation ownership. This
-does not enable return transfers or release any source fence. Live hosts still
-run migration 35; the new expansion has not been deployed.
+does not by itself enable return transfers or release any source fence. It is
+deployed as part of the migration-39 release; migrations 37/38 provide the later
+reviewed generation-advancement path.
 
 The guarded rollback script is
 `migrations/rollback/0036_serving_lifecycle_history.sql`. It requires no later
@@ -242,7 +244,8 @@ pinned private PLC. It enables only owner-controlled returns preserving the
 same identity/recovery keys, with a fresh available username. Upgrade all
 serving processes/workers before enabling it; mixed-version operation remains
 generation-1 only. The existing `hailp account transfer …` flow is reused, followed
-by explicit fresh destination login. These gates/migrations are not deployed.
+by explicit fresh destination login. Both live providers now run migration 39
+with transfer/return enabled, including the real HTTPS round-trip proof.
 
 The native admission adapter currently captures an O(accounts) provider-wide
 generation vector. An unrelated advancement may conservatively invalidate a
@@ -270,7 +273,8 @@ the source generation only after current protective authority, target release
 and source binding verify. Unknown PLC changes or missing counterpart/binding
 proof leave the source fenced. Exact receipts support restart/lost responses.
 The guarded rollback refuses accepted abandonment or sole-copy observation loss.
-No rollout or public-API enabling was performed. See the
+Its code/schema is included in the migration-39 rollout, but no public recovery
+route/command is enabled. See the
 [private recovery proof](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/post-export-recovery.md).
 
 ## API-first account management direction
