@@ -13,6 +13,7 @@ export interface AccountApiSession {
   canonical_address: string;
   scopes: AccountApiScope[];
   migration_state: "fenced" | "exported" | "retired" | null;
+  serving_generation?:number;
 }
 export const tokenHash = (token: string) => new Uint8Array(createHash("sha256").update(token).digest());
 export class CredentialConflictError extends Error {}
@@ -37,10 +38,12 @@ export class AccountApiRepository {
       if (!account) throw new Error("API credentials require an existing active account");
       const fenced = await tx`SELECT did FROM provider_migration_fences WHERE account_id = ${account.id}`;
       if (fenced.length) throw new Error("Cannot issue credentials for a migration-fenced account");
-      const prior = await tx<{id:string;account_id:string;expires_at:Date;revoked_at:Date|null;scopes:unknown}[]>`
-        SELECT id,account_id,expires_at,revoked_at,scopes FROM account_api_credentials WHERE token_hash=${tokenHash(token)}`;
+      const prior = await tx<{id:string;account_id:string;expires_at:Date;revoked_at:Date|null;scopes:unknown;current_generation:boolean}[]>`
+        SELECT c.id,c.account_id,c.expires_at,c.revoked_at,c.scopes,b.generation=g.generation AS current_generation
+        FROM account_api_credentials c LEFT JOIN account_credential_generations b ON b.credential_id=c.id
+        LEFT JOIN account_serving_generations g ON g.account_id=c.account_id WHERE c.token_hash=${tokenHash(token)}`;
       if (prior[0]) {
-        if (prior[0].account_id !== account.id || prior[0].revoked_at || prior[0].expires_at.getTime() <= Date.now()) throw new CredentialConflictError("Credential cannot be reused");
+        if (prior[0].account_id !== account.id || !prior[0].current_generation || prior[0].revoked_at || prior[0].expires_at.getTime() <= Date.now()) throw new CredentialConflictError("Credential cannot be reused");
         const priorScopes = typeof prior[0].scopes === "string" ? JSON.parse(prior[0].scopes) as AccountApiScope[] : prior[0].scopes as AccountApiScope[];
         if (JSON.stringify([...priorScopes].sort()) !== JSON.stringify([...scopes].sort())) throw new CredentialConflictError("Credential retry changed requested scopes");
         return {credentialId:prior[0].id,accountId:account.id,token,scopes:priorScopes,expiresAt:prior[0].expires_at.toISOString()};
@@ -80,8 +83,10 @@ export class AccountApiRepository {
     const rows = await this.sql<(Omit<AccountApiSession, "scopes"> & { scopes: unknown })[]>`
       SELECT account.id AS account_id, credential.id AS credential_id,
         credential.expires_at AS credential_expires_at, account.did, account.canonical_address,
-        credential.scopes, fence.state AS migration_state
+        credential.scopes, fence.state AS migration_state,generation.generation::integer AS serving_generation
       FROM account_api_credentials credential JOIN provider_accounts account ON account.id = credential.account_id
+      JOIN account_credential_generations binding ON binding.credential_id=credential.id
+      JOIN account_serving_generations generation ON generation.account_id=account.id AND generation.generation=binding.generation
       LEFT JOIN provider_migration_fences fence ON fence.account_id = account.id
       WHERE credential.token_hash = ${tokenHash(token)} AND credential.revoked_at IS NULL
         AND credential.expires_at > now() AND account.onboarding_state = 'active' AND account.did IS NOT NULL`;

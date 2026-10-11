@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { SQL } from "bun";
+import {generationBoundSql} from "./serving.js";
 
 interface Migration {
   version: number;
@@ -176,13 +177,17 @@ const migrations: readonly Migration[] = [
   { version: 33, name: "self-service-accounts", url: new URL("../../migrations/0033_self_service_accounts.sql",import.meta.url) },
   { version: 34, name: "account-access-challenges", url: new URL("../../migrations/0034_account_access_challenges.sql", import.meta.url) },
   { version: 35, name: "account-write-scope", url: new URL("../../migrations/0035_account_write_scope.sql", import.meta.url) },
+  { version: 36, name: "serving-lifecycle-history", url: new URL("../../migrations/0036_serving_lifecycle_history.sql", import.meta.url) },
+  { version: 37, name: "generation-admission", url: new URL("../../migrations/0037_generation_admission.sql", import.meta.url) },
+  { version: 38, name: "retired-import-history", url: new URL("../../migrations/0038_retired_import_history.sql", import.meta.url) },
+  { version: 39, name: "transfer-abandonment", url: new URL("../../migrations/0039_transfer_abandonment.sql", import.meta.url) },
 ];
 
 export class ProviderDatabase {
   readonly #sql: SQL;
 
   constructor(databaseUrl: string) {
-    this.#sql = new SQL(databaseUrl, { max: 10 });
+    this.#sql = generationBoundSql(new SQL(databaseUrl, { max: 10 }));
   }
 
   async ping(): Promise<void> {

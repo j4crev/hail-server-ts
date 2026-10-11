@@ -35,6 +35,7 @@ import type { SQL } from "bun";
 import type { AccountBinding } from "./accounts/binding.js";
 import type { AccountTransfer } from "./accounts/transfer.js";
 import type { PrivatePocTransferCompletion } from "./migration/poc-completion.js";
+import {withFreshServingGenerations} from "./db/serving.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -61,6 +62,7 @@ export interface AppDependencies {
   accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging; binding?:AccountBinding;transfer?:AccountTransfer };
   selfServiceOnboarding?: SelfServiceOnboarding;
   accountAccess?: { access: AccountAccess; sql: SQL };
+  servingSql?:SQL;
 }
 
 const defaultDependencies: AppDependencies = {
@@ -74,6 +76,7 @@ export function createApp(
   dependencies: AppDependencies = defaultDependencies,
 ): Hono {
   const app = new Hono();
+  if(dependencies.servingSql)app.use("*",async(_context,next)=>withFreshServingGenerations(dependencies.servingSql!,next));
   const protectedSchedule = new ProtectedResponseSchedule();
   if(dependencies.selfServiceOnboarding)registerSelfServiceOnboarding(app,dependencies.selfServiceOnboarding);
   if (dependencies.accountAccess) registerAccountAccess(app, dependencies.accountAccess.access, dependencies.accountAccess.sql);

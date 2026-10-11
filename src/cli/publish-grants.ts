@@ -1,5 +1,6 @@
 import { loadConfig } from "../config.js";
 import { ProviderDatabase } from "../db/database.js";
+import {withFreshServingGenerations} from "../db/serving.js";
 import { SafeHttpsTransport } from "../discovery/safe-fetch.js";
 import { GrantPublisher } from "../grants/publisher.js";
 import { GrantRepository } from "../grants/repository.js";
@@ -14,12 +15,12 @@ const database = new ProviderDatabase(config.databaseUrl);
 try {
   await database.migrate();
   const transport = new SafeHttpsTransport();
-  const outcome = await new GrantPublisher(
+  const outcome = await withFreshServingGenerations(database.sql,()=>new GrantPublisher(
     new GrantRepository(database.sql),
     new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl)),
     transport.fetch,
     transport.validateTarget,
-  ).publishOne();
+  ).publishOne());
   console.info(JSON.stringify({ outcome }));
 } finally {
   await database.close();

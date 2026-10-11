@@ -14,10 +14,12 @@ export class PrivatePocPlcSubmission {
   }
 
   async submit(transferId: string): Promise<string> {
-    const rows = await this.sql<{ did: string; state: string; manifest_bytes: Uint8Array;
+    // The import-row lock serializes invalidation/activation with this bounded PLC request.
+    return this.sql.begin(async tx=>{
+    const rows = await tx<{ did: string; state: string; manifest_bytes: Uint8Array;
       signed_plc_operation_bytes: Uint8Array;user_consent_payload:Uint8Array;user_consent_signature:Uint8Array;user_identity_public_key:string }[]>`
       SELECT did, state, manifest_bytes, signed_plc_operation_bytes,user_consent_payload,user_consent_signature,user_identity_public_key
-      FROM pending_migration_imports WHERE transfer_id = ${transferId}`;
+      FROM pending_migration_imports WHERE transfer_id = ${transferId} FOR UPDATE`;
     const row = rows[0];
     if (!row || row.state !== "staged") throw new Error("POC PLC write requires an inactive staged import");
     const manifest = validateTransferManifest(row.manifest_bytes);
@@ -49,5 +51,6 @@ export class PrivatePocPlcSubmission {
       throw new Error("Private PLC did not retain the exact user-signed cutover operation");
     }
     return expectedCid;
+    });
   }
 }

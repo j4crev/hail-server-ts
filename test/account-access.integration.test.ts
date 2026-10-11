@@ -164,11 +164,21 @@ integration("post-expiry owner account access", () => {
     await expect(access.prepare(expired.input)).rejects.toThrow();
     const framed=await prepare(owner,"owner-recovery"),framedSig=await sign(owner,framed.challenge);
     for (const state of ["fenced", "exported", "retired"]) {
+      const transferId=randomUUID(),snapshotDigest=state==="fenced"?null:randomBytes(32);
       await db.sql`INSERT INTO provider_migration_fences (did,account_id,transfer_id,destination_service_base,state,snapshot_digest,retirement_receipt_bytes,retired_at)
-        VALUES (${owner.vault.vault.did!},${owner.id},${randomUUID()},'https://target.example.com/hail',${state},${state === "fenced" ? null : randomBytes(32)},
-          ${state === "retired" ? new Uint8Array([1]) : null},${state === "retired" ? new Date() : null})`;
+        VALUES (${owner.vault.vault.did!},${owner.id},${transferId},'https://target.example.com/hail',${state==="retired"?"exported":state},${snapshotDigest},NULL,NULL)`;
+      if(state==="retired") {
+        // Synthetic retired fixtures must retain an export too; migration 36 archives that evidence atomically.
+        await db.sql`INSERT INTO provider_migration_exports
+          (transfer_id,did,manifest_bytes,manifest_digest,source_messaging_public_key,signature,signing_plc_document,signing_plc_data,signing_plc_operation_log)
+          VALUES (${transferId},${owner.vault.vault.did!},${new Uint8Array([1])},${snapshotDigest},${owner.vault.vault.identity.publicDidKey},${randomBytes(64)},'{}','{}','[]')`;
+        await db.sql`UPDATE provider_migration_fences SET state='retired',retirement_receipt_bytes=${new Uint8Array([1])},retired_at=clock_timestamp() WHERE transfer_id=${transferId}`;
+      }
       await expect(access.complete(framed.challenge.challengeId,framed.secret,framedSig)).rejects.toThrow("fenced");
-      expect(await accounts.authenticate(`Bearer ${framed.secret}`)).toBeNull();await db.sql`DELETE FROM provider_migration_fences WHERE account_id=${owner.id}`;
+      expect(await accounts.authenticate(`Bearer ${framed.secret}`)).toBeNull();
+      // Test-only projection cleanup; normal APIs cannot reopen this source or delete archived history.
+      await db.sql`DELETE FROM provider_migration_exports WHERE transfer_id=${transferId}`;
+      await db.sql`DELETE FROM provider_migration_fences WHERE account_id=${owner.id}`;
     }
     const badManaged=await prepare(managed,"identity",token(),await publicKey(managed.providerIdentity.publicKey));
     const providerSig=encodeBase64Url(new Uint8Array(await crypto.subtle.sign("Ed25519",managed.providerIdentity.privateKey,Uint8Array.from(accountAccessInput(badManaged.challenge)))));

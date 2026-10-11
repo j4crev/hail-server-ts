@@ -15,6 +15,7 @@ import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { verifyPortableMigrationConsent, type SignedPortableConsent } from "./consent.js";
 import type { MigrationFence } from "./fence.js";
 import { PreparedMigrationTarget } from "./target-keys.js";
+import {validateReturningEvidence} from "./return.js";
 
 const CONTEXT = new TextEncoder().encode("hail-migration-snapshot-v2\0");
 const MANIFEST_VERSION = 2;
@@ -272,6 +273,7 @@ export class MigrationTransferService {
     private readonly encryptor: KeyEncryptor,
     private readonly resolver: HailDidResolver,
     private readonly serviceBase: string,
+    private readonly allowReturns=false,
   ) {}
 
   async exportFenced(fence: MigrationFence): Promise<SignedTransferSnapshot> {
@@ -406,7 +408,10 @@ export class MigrationTransferService {
         throw new Error("Destination operational key preparation changed before staging");
       }
       const existingAccount = await tx<{ id: string }[]>`SELECT id FROM provider_accounts WHERE did = ${manifest.did}`;
-      if (existingAccount.length) throw new Error("Migration target already serves this DID");
+      if (existingAccount.length) {
+        if(!this.allowReturns)throw new Error("Migration target already serves this DID");
+        await validateReturningEvidence(tx,manifest);
+      }
       const existing = await tx<{ manifest_bytes: Uint8Array; signed_plc_operation_bytes: Uint8Array | null;
         destination_binding_cose: Uint8Array | null;
         state: string }[]>`

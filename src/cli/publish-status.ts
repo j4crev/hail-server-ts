@@ -1,5 +1,6 @@
 import { loadConfig } from "../config.js";
 import { ProviderDatabase } from "../db/database.js";
+import {withFreshServingGenerations} from "../db/serving.js";
 import { DeliveryStatusSigner } from "../delivery/status.js";
 import { TerminalStatusPublisher } from "../delivery/status-publisher.js";
 import { SafeHttpsTransport } from "../discovery/safe-fetch.js";
@@ -16,7 +17,7 @@ try {
   const resolver = new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl));
   const signer = new DeliveryStatusSigner(database.sql, new OnboardingRepository(database.sql),
     new KeyEncryptor(config.keyEncryptionKey), resolver, config.hailServiceBase);
-  const result = await new TerminalStatusPublisher(database.sql, signer, resolver,
-    transport.fetch, transport.validateTarget).publishOne();
+  const result = await withFreshServingGenerations(database.sql,()=>new TerminalStatusPublisher(database.sql, signer, resolver,
+    transport.fetch, transport.validateTarget).publishOne());
   console.info(JSON.stringify({ outcome: result }));
 } finally { await database.close(); }

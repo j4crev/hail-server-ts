@@ -962,6 +962,8 @@ integration("fenced transfer and concurrent cutover", () => {
     // ensure this single worker claim measures the imported DID's obligation.
     await target.sql`UPDATE delivery_work SET next_attempt_at = now() + interval '1 day'
       WHERE state IN ('accepted', 'on-hold')
+        AND NOT EXISTS (SELECT 1 FROM received_envelopes r JOIN provider_migration_fences f ON f.did=r.recipient_did
+          WHERE r.sender_did=delivery_work.sender_did AND r.message_id=delivery_work.message_id)
         AND NOT (sender_did = ${remoteDid} AND message_id = ${incoming.message_id})`;
     const worker = new DeliveryWorker(new DeliveryRepository(target.sql), {
       async retrieve() { throw new Error("An expired accepted envelope must not fetch a body"); },

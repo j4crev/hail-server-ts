@@ -14,6 +14,8 @@ import type { SignedMonitorAttestation } from "./monitor-attestation.js";
 import { PreparedMigrationTarget } from "./target-keys.js";
 import { validateTransferManifest, type TransferManifest } from "./transfer.js";
 import { signActivationReceipt, type SignedActivationReceipt } from "./activation-receipt.js";
+import {replaceRetiredProjection} from "./return.js";
+import {materializedServingGeneration} from "../db/serving.js";
 
 type TableRow = Record<string, unknown>;
 
@@ -40,6 +42,7 @@ export class PortableMigrationActivation {
     private readonly registryOrigin: string,
     private readonly now: () => Date = () => new Date(),
     private readonly profile: "public" | "private-poc" = "public",
+    private readonly allowReturns=false,
   ) {}
 
   async issueReceipt(transferId: string): Promise<SignedActivationReceipt> {
@@ -77,6 +80,7 @@ export class PortableMigrationActivation {
   }
 
   async activate(transferId: string, signedMonitor?: SignedMonitorAttestation): Promise<{ did: string; accountId: string }> {
+    if(this.allowReturns&&this.profile!=="private-poc")throw new Error("Returning materialization is limited to the private-POC profile");
     if (this.profile === "public" && this.registryOrigin !== "https://plc.directory") {
       throw new Error("Portable activation requires the canonical public PLC write registry");
     }
@@ -156,7 +160,8 @@ export class PortableMigrationActivation {
         this.encryptor.encrypt(manifest.accountId, "hail-messaging", "ed25519", prepared.messagingPublicKey, messagingBytes),
       ]);
     } finally { rotationBytes.fill(0); messagingBytes.fill(0); }
-    return this.sql.begin(async (tx) => {
+    let materializedGeneration=1,reservedId="";
+    const result=await this.sql.begin(async (tx) => {
       const importsLocked = await tx<{ state: string }[]>`
         SELECT state FROM pending_migration_imports WHERE transfer_id = ${transferId} FOR UPDATE
       `;
@@ -176,7 +181,8 @@ export class PortableMigrationActivation {
         throw new Error("Current cutover eligibility was lost before materialization");
       }
       const accounts = await tx<{ id: string }[]>`SELECT id FROM provider_accounts WHERE did = ${manifest.did}`;
-      if (accounts.length) throw new Error("Target already has an active account for the DID");
+      const returning=accounts.length>0;
+      if(returning){if(!this.allowReturns)throw new Error("Target already has an active account for the DID");materializedGeneration=await replaceRetiredProjection(tx,manifest);}
       const reserved = await tx<{ reserved_account_id: string | null; canonical_address: string; state: string }[]>`
         SELECT reserved_account_id, canonical_address, state FROM transfer_address_reservations
         WHERE transfer_id = ${transferId} AND did = ${manifest.did} FOR UPDATE`;
@@ -202,7 +208,11 @@ export class PortableMigrationActivation {
         AND canonical_address = ${pending.destination_address} AND did IS NULL
         AND onboarding_state = 'reserved' RETURNING id`;
       if (released.length !== 1) throw new Error("Destination address was assigned elsewhere");
-      await insertRow(tx, "provider_accounts", {
+      reservedId=reserved[0].reserved_account_id;
+      if(returning)await tx`UPDATE provider_accounts SET canonical_address=${pending.destination_address},activated_at=${this.now()},
+        activation_binding_digest=${address.digest},activation_verification_mode='public',onboarding_state='active',updated_at=clock_timestamp()
+        WHERE id=${manifest.accountId} AND did=${manifest.did}`;
+      else await insertRow(tx, "provider_accounts", {
         ...manifest.tables.provider_accounts[0]!, canonical_address: pending.destination_address,
         activation_binding_digest: `\\x${Buffer.from(address.digest).toString("hex")}`,
         activation_verification_mode: "public", activated_at: this.now().toISOString(),
@@ -242,7 +252,7 @@ export class PortableMigrationActivation {
       `;
       for (const row of manifest.tables.sender_profiles) await insertRow(tx, "sender_profiles", row);
       await this.refreshProfile(tx, manifest, messagingKey, prepared.messagingPublicKey);
-      await this.importGrants(tx, manifest);
+      await this.importGrants(tx, manifest,returning);
       for (const table of ["detached_bodies", "body_authorizations"] as const) {
         for (const row of manifest.tables[table]) await insertRow(tx, table, row);
       }
@@ -253,7 +263,7 @@ export class PortableMigrationActivation {
         for (const row of manifest.tables[table]) {
           const resumed = ["delivery_work", "terminal_status_publications"].includes(table) &&
             ["accepted", "on-hold", "pending", "retry"].includes(String(row.state))
-            ? { ...row, lease_token: null, lease_expires_at: null, next_attempt_at: new Date().toISOString() }
+             ? { ...row, lease_token: null, lease_expires_at: null }
             : row;
           await insertRow(tx, table, resumed);
         }
@@ -268,6 +278,7 @@ export class PortableMigrationActivation {
       await tx`UPDATE transfer_address_reservations SET state = 'active' WHERE transfer_id = ${transferId}`;
       return { did: manifest.did, accountId: manifest.accountId };
     });
+    materializedServingGeneration(manifest.accountId,materializedGeneration,reservedId);return result;
   }
 
   private async currentOperationCid(bytes: Uint8Array): Promise<string> {
@@ -277,7 +288,7 @@ export class PortableMigrationActivation {
     return (await cidForCbor(operation)).toString();
   }
 
-  private async importGrants(tx: SQL, manifest: TransferManifest): Promise<void> {
+  private async importGrants(tx: SQL, manifest: TransferManifest,returning=false): Promise<void> {
     const pgBytes = (value: unknown): Uint8Array => {
       if (typeof value !== "string" || !/^\\x(?:[0-9a-f]{2})+$/i.test(value)) {
         throw new Error("Transferred Grant has an invalid PostgreSQL byte representation");
@@ -294,6 +305,12 @@ export class PortableMigrationActivation {
         FROM grant_lineages WHERE grant_id = ${grantId} FOR UPDATE`;
       if (!existing[0]) { await insertRow(tx, "grant_lineages", row); continue; }
       const prior = existing[0];
+      if(returning&&prior.local_account_id===manifest.accountId&&prior.local_role===row.local_role&&prior.grantor_did===row.grantor_did&&prior.grantee_did===row.grantee_did&&
+        Number(row.current_revision)>=prior.current_revision) {
+        await tx`UPDATE grant_lineages SET current_revision=${row.current_revision as number},current_status=${row.current_status as string},
+          current_digest=${pgBytes(row.current_digest)} WHERE grant_id=${grantId}`;
+        continue;
+      }
       const counterpart = await tx<{ did: string | null; onboarding_state: string }[]>`
         SELECT did, onboarding_state FROM provider_accounts
         WHERE id = ${prior.local_account_id} FOR UPDATE`;
@@ -350,7 +367,7 @@ export class PortableMigrationActivation {
         }
       } else {
         const resumed = ["pending", "retry"].includes(String(row.state))
-          ? { ...row, lease_token: null, lease_expires_at: null, next_attempt_at: new Date().toISOString() }
+          ? { ...row, lease_token: null, lease_expires_at: null }
           : row;
         await insertRow(tx, "grant_publications", resumed);
       }

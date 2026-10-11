@@ -624,8 +624,10 @@ export class OnboardingRepository
         ORDER BY selected_at DESC, id DESC LIMIT 1
       ) AS current_binding
       WHERE expires_at > now()
+        AND EXISTS (SELECT 1 FROM provider_accounts account WHERE account.id=current_binding.account_id
+          AND account.canonical_address=current_binding.canonical_address)
         AND NOT EXISTS (SELECT 1 FROM provider_migration_fences fence
-          WHERE fence.did = current_binding.did AND fence.state = 'retired')
+          WHERE fence.account_id = current_binding.account_id AND fence.state = 'retired')
     `;
     return rows[0] ? bindingFromRow(rows[0]) : null;
   }

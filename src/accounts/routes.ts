@@ -8,6 +8,7 @@ import type { AccountMessaging } from "./messaging.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { BindingError, type AccountBinding } from "./binding.js";
 import { AccountTransferError,type AccountTransfer } from "./transfer.js";
+import {withServingGeneration} from "../db/serving.js";
 
 const GRANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BYTES = 262_144;
@@ -54,6 +55,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
     try {
       const session = await accounts.authenticate(context.req.header("Authorization"));
       if (!session) { context.header("WWW-Authenticate", 'Bearer realm="hailp-account"'); return problem(401); }
+      return await withServingGeneration<Response>(session.account_id,session.serving_generation??1,async():Promise<Response>=>{
       const query = new URL(context.req.url).searchParams;
       if (query.size && action !== "list" && action !== "inbox" && action !== "credential") return problem(400);
       const method = context.req.method;
@@ -229,6 +231,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
       context.header("ETag", `"${encodeBase64Url(saved.digest)}"`);
       return context.json({ grantId, revision: saved.payload.revision, status: saved.payload.status,
         digest: encodeBase64Url(saved.digest), publication: "durable" });
+      });
     } catch (error) {
       if (error instanceof UserGrantError) return problem(error.status);
       if (error instanceof BindingError) return problem(error.status);

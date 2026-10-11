@@ -27,6 +27,7 @@ export class TransferInvitationReceiver {
     return this.sql.begin(async (tx) => {
       // Serialize retries, including first-time preparation, without ever activating the DID.
       await tx`SELECT pg_advisory_xact_lock(684245102, hashtext(${grant.did}))`;
+      await this.target.recycleRetiredSlots(tx,grant.did);
       const cancelled = await tx`SELECT 1 FROM cancelled_transfer_sessions
         WHERE did = ${grant.did} AND nonce = ${grant.nonce}`;
       if (cancelled.length) throw new Error("This user transfer was cancelled by the source");

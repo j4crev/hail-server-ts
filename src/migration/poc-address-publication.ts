@@ -41,6 +41,8 @@ export class PrivatePocAddressPublication {
       throw new Error("POC address selection does not match the signed target binding");
     }
     return this.sql.begin(async (tx) => {
+      const current=await tx<{state:string}[]>`SELECT state FROM pending_migration_imports WHERE transfer_id=${transferId} FOR UPDATE`;
+      if(current[0]?.state!=="staged")throw new Error("Address publication lost inactive staging authority");
       const reservations = await tx<{ reserved_account_id: string | null; state: string;
         canonical_address: string }[]>`
         SELECT reserved_account_id, state, canonical_address

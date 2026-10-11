@@ -1,5 +1,6 @@
 import { loadConfig } from "../config.js";
 import { ProviderDatabase } from "../db/database.js";
+import {withFreshServingGenerations} from "../db/serving.js";
 import { DeliveryRepository } from "../delivery/repository.js";
 import { BodyRetriever } from "../delivery/retriever.js";
 import { DeliveryWorker } from "../delivery/worker.js";
@@ -14,6 +15,6 @@ try {
   const worker = new DeliveryWorker(new DeliveryRepository(database.sql),
     new BodyRetriever(new PlcHailDidResolver(createPlcDirectoryClient(loadConfig().plcDirectoryUrl)),
       transport.fetchBody, transport.validateTarget));
-  const outcome = await worker.processOne();
+  const outcome = await withFreshServingGenerations(database.sql,()=>worker.processOne());
   console.info(JSON.stringify({ outcome }));
 } finally { await database.close(); }

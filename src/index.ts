@@ -50,6 +50,7 @@ import { PrivatePocPlcSubmission } from "./migration/poc-plc-submission.js";
 import { PrivatePocCutoverGate } from "./migration/poc-cutover-gate.js";
 import { PrivatePocAddressPublication } from "./migration/poc-address-publication.js";
 import { PortableMigrationActivation } from "./migration/activation.js";
+import {withFreshServingGenerations} from "./db/serving.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -73,7 +74,7 @@ const statusSigner = new DeliveryStatusSigner(database.sql, onboardingRepository
 const statusPublisher = new TerminalStatusPublisher(database.sql, statusSigner, resolver,
   transport.fetch, transport.validateTarget);
 const targetKeys = new PreparedMigrationTarget(database.sql,
-  new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase);
+  new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase,process.env.POC_SELF_SERVICE_RETURN==="true");
 const finalTransferPublisher = new TransferFinalRequestPublisher(database.sql, resolver,
   targetKeys, transport.fetch, transport.validateTarget);
 const invitationDelivery = new TransferInvitationDelivery(database.sql, resolver,
@@ -84,6 +85,7 @@ const transferCleanup = new TransferCleanup(database.sql, transferRateLimit);
 const schemaRehearsal = process.env.POC_SCHEMA_REHEARSAL === "true";
 if (!schemaRehearsal && process.env.POC_ACCOUNT_ACCESS === "true") assertPrivatePocRegistry(config.plcDirectoryUrl, config.hailServiceBase);
 if (!schemaRehearsal && process.env.POC_SELF_SERVICE_TRANSFER === "true") assertPrivatePocRegistry(config.plcDirectoryUrl, config.hailServiceBase);
+if(!schemaRehearsal&&process.env.POC_SELF_SERVICE_RETURN==="true"&&process.env.POC_SELF_SERVICE_TRANSFER!=="true")throw new Error("Private-POC return requires the self-service transfer gate");
 if (schemaRehearsal && (config.plcDirectoryUrl !== "http://plc:2582" ||
   !config.databaseUrl.endsWith("/hail_private_stage"))) {
   throw new Error("POC schema rehearsal must use the internal PLC and isolated database clone");
@@ -97,7 +99,7 @@ setInterval(async () => {
   if (publicationRunning) return;
   publicationRunning = true;
   try {
-    await grantPublisher.publishOne();
+    await withFreshServingGenerations(database.sql,()=>grantPublisher.publishOne());
   } catch (error) {
     console.error(
       JSON.stringify({
@@ -115,7 +117,7 @@ let cleanupRunning = false;
 setInterval(async () => {
   if (cleanupRunning) return;
   cleanupRunning = true;
-  try { await transferCleanup.runOnce(); }
+  try { await withFreshServingGenerations(database.sql,()=>transferCleanup.runOnce()); }
   catch (error) {
     console.error(JSON.stringify({ level: "error", message: "transfer cleanup failed",
       error: error instanceof Error ? error.message : "unknown error" }));
@@ -126,7 +128,7 @@ let transferRunning = false;
 setInterval(async () => {
   if (transferRunning) return;
   transferRunning = true;
-  try { await transferWorker.runOnce(); }
+  try { await withFreshServingGenerations(database.sql,()=>transferWorker.runOnce()); }
   catch (error) {
     console.error(JSON.stringify({ level: "error", message: "transfer delivery worker failed",
       error: error instanceof Error ? error.message : "unknown error" }));
@@ -137,7 +139,7 @@ let statusRunning = false;
 setInterval(async () => {
   if (statusRunning) return;
   statusRunning = true;
-  try { await statusPublisher.publishOne(); }
+  try { await withFreshServingGenerations(database.sql,()=>statusPublisher.publishOne()); }
   catch (error) {
     console.error(JSON.stringify({ level: "error", message: "terminal status worker failed",
       error: error instanceof Error ? error.message : "unknown error" }));
@@ -148,7 +150,7 @@ let deliveryRunning = false;
 setInterval(async () => {
   if (deliveryRunning) return;
   deliveryRunning = true;
-  try { await deliveryWorker.processOne(); }
+  try { await withFreshServingGenerations(database.sql,()=>deliveryWorker.processOne()); }
   catch (error) {
     console.error(JSON.stringify({ level: "error", message: "delivery worker failed",
       error: error instanceof Error ? error.message : "unknown error" }));
@@ -164,17 +166,18 @@ let transferCompletion:PrivatePocTransferCompletion|undefined;
 if(!schemaRehearsal&&process.env.POC_SELF_SERVICE_TRANSFER==="true") {
   const encryptor=new KeyEncryptor(config.keyEncryptionKey),gate=new PrivatePocCutoverGate(database.sql,
     {origin:config.plcDirectoryUrl,resolver,audit:did=>plc.getAuditableLog(did)},config.plcDirectoryUrl,config.hailServiceBase);
-  transferCompletion=new PrivatePocTransferCompletion(database.sql,new MigrationTransferService(database.sql,onboardingRepository,encryptor,resolver,config.hailServiceBase),
+  transferCompletion=new PrivatePocTransferCompletion(database.sql,new MigrationTransferService(database.sql,onboardingRepository,encryptor,resolver,config.hailServiceBase,process.env.POC_SELF_SERVICE_RETURN==="true"),
     new PrivatePocPlcSubmission(database.sql,plc,config.plcDirectoryUrl,config.hailServiceBase),
     new PrivatePocAddressPublication(database.sql,resolver,gate,config.plcDirectoryUrl,config.hailServiceBase),
     new PortableMigrationActivation(database.sql,encryptor,resolver,gate,new AddressVerifier(plc,transport.fetch,transport.validateTarget),
-      config.hailServiceBase,config.plcDirectoryUrl,undefined,"private-poc"),config.hailServiceBase);
+      config.hailServiceBase,config.plcDirectoryUrl,undefined,"private-poc",process.env.POC_SELF_SERVICE_RETURN==="true"),config.hailServiceBase);
 }
 const app = createApp(config, schemaRehearsal ? {
   discoveryStore: onboardingRepository,
   senderProfileStore: onboardingRepository,
   checkReadiness,
 } : {
+  servingSql:database.sql,
   ...(process.env.POC_ACCOUNT_ACCESS === "true" ?
     { accountAccess: { access: new AccountAccess(database.sql, resolver, config.publicOrigin), sql: database.sql } } : {}),
   ...(process.env.POC_SELF_SERVICE_ONBOARDING === "true" ? {selfServiceOnboarding:{sql:database.sql,

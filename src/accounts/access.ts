@@ -86,8 +86,10 @@ export class AccountAccess {
         WHERE id=${challenge.accountId} AND did=${challenge.did} FOR UPDATE`;
       if (!accounts[0] || accounts[0].onboarding_state !== "active") throw new Error("Account unavailable");
       if ((await tx`SELECT did FROM provider_migration_fences WHERE account_id=${challenge.accountId}`).length) throw new Error("Account fenced");
-      const stored = await tx<ChallengeRow[]>`SELECT payload,completion_hash,credential_id FROM account_access_challenges
-        WHERE id=${id} AND expires_at > clock_timestamp() FOR UPDATE`;
+       const stored = await tx<ChallengeRow[]>`SELECT payload,completion_hash,credential_id FROM account_access_challenges c
+         JOIN account_challenge_generations binding ON binding.challenge_id=c.id
+         JOIN account_serving_generations generation ON generation.account_id=${challenge.accountId} AND generation.generation=binding.generation
+         WHERE c.id=${id} AND expires_at > clock_timestamp() FOR UPDATE OF c`;
       if (!stored[0]) throw new Error("Challenge expired");
       const owner = await tx<{recovery:string;identity:string}[]>`SELECT user_recovery_public_key AS recovery,user_identity_public_key AS identity
         FROM portable_custody_evidence WHERE account_id=${challenge.accountId}`;
