@@ -711,7 +711,9 @@ the user's externally published Address Binding before importing all state in
 one transaction. It renews the Sender Profile with the destination messaging
 key, normalizes inherited leases, and gives the source a signed retirement
 receipt. The source never receives the destination private key; the snapshot
-contains **no encrypted private-key ciphertext** from the source.
+contains **no encrypted private-key ciphertext**, raw bearer tokens, or other
+private secrets from the source. One-way authorization hashes such as
+`body_authorizations.token_hash` are retained as intentional continuity data.
 
 Before fencing, the source validates a user-identity-signed Transfer Grant
 naming a **provider domain**, derives that provider's fixed well-known HTTPS

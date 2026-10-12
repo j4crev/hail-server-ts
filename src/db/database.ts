@@ -189,6 +189,7 @@ const migrations: readonly Migration[] = [
   { version: 45, name: "same-provider-custody-transition", url: new URL("../../migrations/0045_same_provider_custody_transition.sql", import.meta.url) },
   { version: 46, name: "reverse-custody-transition", url: new URL("../../migrations/0046_reverse_custody_transition.sql", import.meta.url) },
   { version: 47, name: "managed-provider-migration", url: new URL("../../migrations/0047_managed_provider_migration.sql", import.meta.url) },
+  { version: 48, name: "managed-migration-approval", url: new URL("../../migrations/0048_managed_migration_approval.sql", import.meta.url) },
 ];
 
 export class ProviderDatabase {

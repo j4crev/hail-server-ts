@@ -111,13 +111,14 @@ integration("same-provider custody changes are owner-approved, retryable and ato
     const approvalBytes=encodeDeterministic(approval as unknown as HailValue),tag=new TextEncoder().encode("hailp.custody-transition.v1\0"),input=new Uint8Array(tag.length+approvalBytes.length);
     input.set(tag);input.set(approvalBytes,tag.length);const signature=await owner.sign(input);ambiguousUpdate=true;
     const changedOperation=await signOperation({...transition.unsignedOperation,alsoKnownAs:["at://unapproved.example.com"]},owner);
-    await expect(service.commit(transition.transitionId,new TextEncoder().encode(JSON.stringify(changedOperation)),approvalBytes,signature)).rejects.toThrow("full state");
+    await expect(service.commit(prepared.accountId,transition.transitionId,new TextEncoder().encode(JSON.stringify(changedOperation)),approvalBytes,signature)).rejects.toThrow("full state");
     const changedApproval=encodeDeterministic({...approval,binding_sha256:randomBytes(32)} as unknown as HailValue),changedInput=new Uint8Array(tag.length+changedApproval.length);
     changedInput.set(tag);changedInput.set(changedApproval,tag.length);
-    await expect(service.commit(transition.transitionId,operationBytes,changedApproval,await owner.sign(changedInput))).rejects.toThrow("does not match");
-    const completed=await service.commit(transition.transitionId,operationBytes,approvalBytes,signature);expect(completed.generation).toBe(2);
-    expect(await service.commit(transition.transitionId,operationBytes,approvalBytes,signature)).toEqual(completed);
-    await expect(service.commit(transition.transitionId,operationBytes,approvalBytes,Uint8Array.from(signature,b=>b^1))).rejects.toThrow();
+    await expect(service.commit(prepared.accountId,transition.transitionId,operationBytes,changedApproval,await owner.sign(changedInput))).rejects.toThrow("does not match");
+    await expect(service.commit(randomUUID(),transition.transitionId,operationBytes,approvalBytes,signature)).rejects.toThrow("does not exist");
+    const completed=await service.commit(prepared.accountId,transition.transitionId,operationBytes,approvalBytes,signature);expect(completed.generation).toBe(2);
+    expect(await service.commit(prepared.accountId,transition.transitionId,operationBytes,approvalBytes,signature)).toEqual(completed);
+    await expect(service.commit(prepared.accountId,transition.transitionId,operationBytes,approvalBytes,Uint8Array.from(signature,b=>b^1))).rejects.toThrow();
     expect(await db.sql`SELECT account_id FROM portable_custody_evidence WHERE account_id=${prepared.accountId}`).toHaveLength(0);
     expect(await db.sql`SELECT account_id FROM managed_custody_evidence WHERE account_id=${prepared.accountId} AND provider_identity_public_key=${transition.newIdentityKey}`).toHaveLength(1);
     expect(await db.sql`SELECT role FROM account_keys WHERE account_id=${prepared.accountId} AND role='hail-identity' AND public_key=${transition.newIdentityKey}`).toHaveLength(1);
@@ -166,7 +167,7 @@ integration("same-provider custody changes are owner-approved, retryable and ato
       nonce:randomUUID(),issued_at:reverseIssued,expires_at:reverseIssued+1800};
     const reverseApprovalBytes=encodeDeterministic(reverseApproval as unknown as HailValue),reverseInput=new Uint8Array(tag.length+reverseApprovalBytes.length);
     reverseInput.set(tag);reverseInput.set(reverseApprovalBytes,tag.length);ambiguousUpdate=true;
-    const reverseComplete=await service.commit(reverse.transitionId,reverseBytes,reverseApprovalBytes,await owner.sign(reverseInput));
+    const reverseComplete=await service.commit(prepared.accountId,reverse.transitionId,reverseBytes,reverseApprovalBytes,await owner.sign(reverseInput));
     expect(reverseComplete.generation).toBe(3);
     expect(await db.sql`SELECT account_id FROM managed_custody_evidence WHERE account_id=${prepared.accountId}`).toHaveLength(0);
     expect(await db.sql`SELECT account_id FROM portable_custody_evidence WHERE account_id=${prepared.accountId}

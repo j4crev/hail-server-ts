@@ -8,11 +8,62 @@ import type { TransferRateLimit } from "./rate-limit.js";
 import type { TransferCancellationService } from "./cancellation.js";
 import type { TransferCancellationReceiver } from "./cancellation-receiver.js";
 import type { PrivatePocTransferCompletion } from "./poc-completion.js";
+import type { ManagedTransferInvitationReceiver } from "./managed-invitation-receiver.js";
+import type { ManagedTransferAddressReservation } from "./managed-address-selection.js";
+import type { ManagedTransferFencePublisher } from "./managed-fence-publisher.js";
+import type { ManagedMigrationFenceService } from "./managed-fence.js";
 import { decodeDeterministic } from "@hailproto/codec";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { boundedTransferBody, parseInvitationWire, parseFinalRequestWire,
   parseRequestWire, parseCancellationWire, requestWire,
   TRANSFER_MEDIA_TYPE } from "./wire.js";
+import { parseManagedInvitationWire } from "./wire.js";
+
+export function registerManagedTransferRoutes(app:Hono,receiver?:ManagedTransferInvitationReceiver,
+  rateLimit?:TransferRateLimit,reservations?:ManagedTransferAddressReservation,
+  publisher?:Pick<ManagedTransferFencePublisher,"publish">,fence?:ManagedMigrationFenceService):void {
+  if(receiver)app.post("/.well-known/hail/transfers/managed-invitations",async context=>{
+    if(rateLimit&&!await rateLimit.admit("invitation"))return new Response(null,{status:429,headers:{"Cache-Control":"no-store"}});
+    if(context.req.header("content-type")!==TRANSFER_MEDIA_TYPE||context.req.header("content-encoding")!==undefined)
+      return new Response(null,{status:415,headers:{"Cache-Control":"no-store"}});
+    try {
+      const {grant,acknowledgement}=parseManagedInvitationWire(await boundedTransferBody(context.req.raw.body,
+        context.req.header("content-length")??null));
+      const offer=await receiver.receive(grant,acknowledgement);
+      return new Response(Uint8Array.from(requestWire(offer)),{status:200,
+        headers:{"Content-Type":TRANSFER_MEDIA_TYPE,"Cache-Control":"no-store"}});
+    } catch {return new Response(null,{status:400,headers:{"Cache-Control":"no-store"}});}
+  });
+  if(reservations&&publisher)app.post("/.well-known/hail/transfers/managed-reservations",async context=>{
+    if(rateLimit&&!await rateLimit.admit("reservation"))return new Response(null,{status:429,headers:{"Cache-Control":"no-store"}});
+    if(context.req.header("content-type")!==TRANSFER_MEDIA_TYPE||context.req.header("content-encoding")!==undefined)
+      return new Response(null,{status:415,headers:{"Cache-Control":"no-store"}});
+    try {
+      const selection=parseRequestWire(await boundedTransferBody(context.req.raw.body,
+        context.req.header("content-length")??null));
+      const reserved=await reservations.reserve(selection);
+      try {await publisher.publish(reserved.prepared.transferId);}
+      catch {return new Response(Uint8Array.from(requestWire(reserved.reservation)),{status:202,
+        headers:{"Content-Type":TRANSFER_MEDIA_TYPE,"Cache-Control":"no-store"}});}
+      return new Response(Uint8Array.from(requestWire(reserved.reservation)),{status:200,
+        headers:{"Content-Type":TRANSFER_MEDIA_TYPE,"Cache-Control":"no-store"}});
+    } catch(error) {
+      return new Response(null,{status:error instanceof Error&&error.message==="Address not available"?409:
+        error instanceof Error&&error.message.includes("rate limited")?429:400,headers:{"Cache-Control":"no-store"}});
+    }
+  });
+  if(fence)app.post("/hail/transfers/managed-requests",async context=>{
+    if(rateLimit&&!await rateLimit.admit("request"))return new Response(null,{status:429,headers:{"Cache-Control":"no-store"}});
+    if(context.req.header("content-type")!==TRANSFER_MEDIA_TYPE||context.req.header("content-encoding")!==undefined)
+      return new Response(null,{status:415,headers:{"Cache-Control":"no-store"}});
+    try {
+      const {selection,reservation,request}=parseFinalRequestWire(await boundedTransferBody(context.req.raw.body,
+        context.req.header("content-length")??null));
+      if(!await fence.previouslyAccepted(request,selection,reservation))await fence.begin(request,selection,reservation);
+      return new Response(null,{status:204,headers:{"Cache-Control":"no-store"}});
+    } catch {return new Response(null,{status:400,headers:{"Cache-Control":"no-store"}});}
+  });
+}
 
 export function registerTransferRoutes(app: Hono, receiver: TransferInvitationReceiver,
   reservations?: TransferAddressReservation, fence?: MigrationFenceService,

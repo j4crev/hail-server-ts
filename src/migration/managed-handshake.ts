@@ -37,6 +37,22 @@ export interface ManagedTransferAddressSelection {
   issued_at: number; expires_at: number;
 }
 
+export interface ManagedTransferReservation {
+  type: "hail.managed-transfer-reservation"; version: 1; did: string; nonce: string; transfer_id: string;
+  offer_digest: Uint8Array; selection_digest: Uint8Array; address: string;
+  destination_rotation_key: string; destination_identity_key: string; destination_messaging_key: string;
+  issued_at: number; expires_at: number;
+}
+
+export interface ManagedTransferFenceRequest {
+  type: "hail.managed-transfer-fence-request"; version: 1; did: string; nonce: string; transfer_id: string;
+  source_service_base: string; destination_service_base: string; destination_address: string;
+  owner_recovery_key: string; source_identity_key: string; destination_rotation_key: string;
+  destination_identity_key: string; destination_messaging_key: string;
+  grant_digest: Uint8Array; acknowledgement_digest: Uint8Array; offer_digest: Uint8Array;
+  selection_digest: Uint8Array; reservation_digest: Uint8Array; issued_at: number; expires_at: number;
+}
+
 export interface ManagedTransferApproval {
   type: "hail.managed-transfer-approval"; version: 1; did: string; nonce: string; transfer_id: string;
   source_service_base: string; destination_service_base: string; destination_address: string;
@@ -49,7 +65,7 @@ export interface ManagedTransferApproval {
 }
 
 type ManagedHandshake = ManagedTransferGrant | ManagedTransferAcknowledgement | ManagedTransferOffer |
-  ManagedTransferAddressSelection | ManagedTransferApproval;
+  ManagedTransferAddressSelection | ManagedTransferReservation | ManagedTransferFenceRequest | ManagedTransferApproval;
 export type ManagedHandshakeKind = ManagedHandshake["type"];
 
 const fields: Record<ManagedHandshakeKind, string[]> = {
@@ -62,6 +78,13 @@ const fields: Record<ManagedHandshakeKind, string[]> = {
     "destination_messaging_key", "issued_at", "expires_at"],
   "hail.managed-transfer-address-selection": ["type", "version", "did", "nonce", "transfer_id", "grant_digest",
     "offer_digest", "address", "selection_nonce", "issued_at", "expires_at"],
+  "hail.managed-transfer-reservation": ["type", "version", "did", "nonce", "transfer_id", "offer_digest",
+    "selection_digest", "address", "destination_rotation_key", "destination_identity_key",
+    "destination_messaging_key", "issued_at", "expires_at"],
+  "hail.managed-transfer-fence-request": ["type", "version", "did", "nonce", "transfer_id", "source_service_base",
+    "destination_service_base", "destination_address", "owner_recovery_key", "source_identity_key",
+    "destination_rotation_key", "destination_identity_key", "destination_messaging_key", "grant_digest",
+    "acknowledgement_digest", "offer_digest", "selection_digest", "reservation_digest", "issued_at", "expires_at"],
   "hail.managed-transfer-approval": ["type", "version", "did", "nonce", "transfer_id", "source_service_base",
     "destination_service_base", "destination_address", "owner_recovery_key", "source_identity_key",
     "destination_rotation_key", "destination_identity_key", "destination_messaging_key", "grant_digest", "offer_digest",
@@ -90,13 +113,16 @@ function validate<K extends ManagedHandshakeKind>(value: unknown, kind: K): Extr
     typeof item.nonce !== "string" || !UUID.test(item.nonce) || !Number.isSafeInteger(item.issued_at) ||
     !Number.isSafeInteger(item.expires_at) || (item.expires_at as number) <= (item.issued_at as number) ||
     (item.expires_at as number) - (item.issued_at as number) > MAX_AGE) throw new Error("Invalid managed transfer identity or lifetime");
-  if (kind !== "hail.managed-transfer-address-selection" &&
+  if (kind !== "hail.managed-transfer-address-selection" && kind !== "hail.managed-transfer-reservation" &&
     (!validBase(item.source_service_base) || !validBase(item.destination_service_base) ||
       item.source_service_base === item.destination_service_base)) throw new Error("Invalid managed transfer providers");
   if (kind !== "hail.managed-transfer-grant" && kind !== "hail.managed-transfer-acknowledgement" &&
-    (typeof item.transfer_id !== "string" || !UUID.test(item.transfer_id) || !digest(item.grant_digest))) {
+    (typeof item.transfer_id !== "string" || !UUID.test(item.transfer_id))) {
     throw new Error("Invalid managed transfer linkage");
   }
+  if (["hail.managed-transfer-offer", "hail.managed-transfer-address-selection",
+    "hail.managed-transfer-fence-request", "hail.managed-transfer-approval"].includes(kind) &&
+    !digest(item.grant_digest)) throw new Error("Invalid managed transfer grant linkage");
   if (kind === "hail.managed-transfer-grant") {
     if (typeof item.destination_domain !== "string" ||
       serviceBaseForDomain(item.destination_domain) !== item.destination_service_base ||
@@ -117,6 +143,24 @@ function validate<K extends ManagedHandshakeKind>(value: unknown, kind: K): Extr
     if (!digest(item.offer_digest) || typeof item.selection_nonce !== "string" || !UUID.test(item.selection_nonce) ||
       typeof item.address !== "string" || canonicalizeHailAddress(item.address) !== item.address) {
       throw new Error("Invalid managed transfer address selection");
+    }
+  }
+  if (kind === "hail.managed-transfer-reservation") {
+    const keys = [item.destination_rotation_key, item.destination_identity_key, item.destination_messaging_key];
+    if (!digest(item.offer_digest) || !digest(item.selection_digest) ||
+      typeof item.address !== "string" || canonicalizeHailAddress(item.address) !== item.address ||
+      !keys.every(didKey) || new Set(keys).size !== 3) {
+      throw new Error("Invalid managed transfer reservation");
+    }
+  }
+  if (kind === "hail.managed-transfer-fence-request") {
+    const keys = [item.owner_recovery_key, item.source_identity_key, item.destination_rotation_key,
+      item.destination_identity_key, item.destination_messaging_key];
+    if (!keys.every(didKey) || new Set(keys).size !== keys.length || !digest(item.acknowledgement_digest) ||
+      !digest(item.offer_digest) || !digest(item.selection_digest) || !digest(item.reservation_digest) ||
+      typeof item.destination_address !== "string" ||
+      canonicalizeHailAddress(item.destination_address) !== item.destination_address) {
+      throw new Error("Invalid managed transfer fence request");
     }
   }
   if (kind === "hail.managed-transfer-approval") {
@@ -170,19 +214,21 @@ export async function verifyManagedOwnerHandshake<K extends "hail.managed-transf
   return value;
 }
 
-export async function signManagedProviderHandshake<T extends ManagedTransferAcknowledgement | ManagedTransferOffer>(value: T, privateKey: CryptoKey): Promise<SignedManagedHandshake> {
+export async function signManagedProviderHandshake<T extends ManagedTransferAcknowledgement | ManagedTransferOffer |
+  ManagedTransferReservation | ManagedTransferFenceRequest>(value: T, privateKey: CryptoKey): Promise<SignedManagedHandshake> {
   const payloadBytes = encodeManagedHandshake(value);
   return { payloadBytes, signature: new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey,
     managedHandshakeSignatureInput(value.type, payloadBytes))) };
 }
 
-export async function verifyManagedProviderHandshake<K extends "hail.managed-transfer-acknowledgement" | "hail.managed-transfer-offer">(
+export async function verifyManagedProviderHandshake<K extends "hail.managed-transfer-acknowledgement" | "hail.managed-transfer-offer" |
+  "hail.managed-transfer-reservation" | "hail.managed-transfer-fence-request">(
   signed: SignedManagedHandshake, kind: K, publicKey: string,
 ): Promise<Extract<ManagedHandshake, {type: K}>> {
   const value = decode(signed, kind);
-  const claimed = kind === "hail.managed-transfer-offer"
-    ? (value as ManagedTransferOffer).destination_messaging_key
-    : (value as ManagedTransferAcknowledgement).source_messaging_key;
+  const claimed = kind === "hail.managed-transfer-acknowledgement"
+    ? (value as ManagedTransferAcknowledgement).source_messaging_key
+    : (value as ManagedTransferOffer | ManagedTransferReservation | ManagedTransferFenceRequest).destination_messaging_key;
   if (claimed !== publicKey || !await crypto.subtle.verify("Ed25519",
     await ed25519PublicKeyFromDidKey(publicKey), Uint8Array.from(signed.signature),
     managedHandshakeSignatureInput(kind, signed.payloadBytes))) throw new Error("Managed transfer provider signature is invalid");

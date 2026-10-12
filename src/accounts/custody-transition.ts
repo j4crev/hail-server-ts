@@ -66,7 +66,7 @@ interface SuccessorRow { grant_id:string;predecessor_revision:number;predecessor
 export interface CustodyTransitionPreparation {
   transitionId:string; accountId:string; did:string; direction:"owner-to-managed"|"managed-to-owner";
   ownerRecoveryKey:string; oldIdentityKey:string; newIdentityKey:string;
-  unsignedOperation:UnsignedOperation; previousOperationCid:string;
+  currentState:DocumentData; unsignedOperation:UnsignedOperation; previousOperationCid:string;
   historyCheckpointDigest:Uint8Array; bindingCose:Uint8Array; bindingDigest:Uint8Array;
   generationFrom:number; generationTo:number; expiresAt:string;
 }
@@ -253,15 +253,16 @@ export class SameProviderCustodyTransition {
           ${row.successor_cose},${row.successor_digest},${row.destination_service_base})`;
       return {transitionId,accountId,did:account.did,direction:"owner-to-managed",ownerRecoveryKey:portable.user_recovery_public_key,
         oldIdentityKey:portable.user_identity_public_key,newIdentityKey:generated.didKey,unsignedOperation,previousOperationCid,
+        currentState:def.documentData.parse(current.evidence.data),
         historyCheckpointDigest:checkpoint,bindingCose,bindingDigest,generationFrom:generation,generationTo:generation+1,
         expiresAt:expiresAt.toISOString()};
     });
   }
 
-  async commit(transitionId:string,operationBytes:Uint8Array,approvalBytes:Uint8Array,approvalSignature:Uint8Array) {
+  async commit(accountId:string,transitionId:string,operationBytes:Uint8Array,approvalBytes:Uint8Array,approvalSignature:Uint8Array) {
     if(operationBytes.length<1||operationBytes.length>16_000||approvalBytes.length<1||approvalBytes.length>16_384||approvalSignature.length!==64)
       throw new Error("Custody transition evidence exceeds its limit");
-    let row=await this.row(transitionId),operation=def.operation.parse(parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(operationBytes)));
+    let row=await this.row(accountId,transitionId),operation=def.operation.parse(parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(operationBytes)));
     const expected=parsedState(row.expected_state),unsigned={type:operation.type,prev:operation.prev,rotationKeys:operation.rotationKeys,
       verificationMethods:operation.verificationMethods,alsoKnownAs:operation.alsoKnownAs,services:operation.services};
     if(!isDeepStrictEqual(unsigned,{type:"plc_operation",prev:row.previous_operation_cid,rotationKeys:expected.rotationKeys,
@@ -302,7 +303,7 @@ export class SameProviderCustodyTransition {
     if(!observed.evidence.verification||observed.evidence.verification.operationCid!==cid||observed.identityDidKey!==row.new_identity_public_key||
       observed.serviceBase!==this.serviceBase||!isDeepStrictEqual(observed.evidence.data,expected))throw new Error("Independent readers do not confirm the approved custody state");
     await this.materialize(row,operation,operationBytes,dagBytes,cid,observed.evidence);
-    row=await this.row(transitionId);
+    row=await this.row(accountId,transitionId);
     const published=await this.verifier.verify((await this.sql<{canonical_address:string}[]>`SELECT canonical_address FROM provider_accounts WHERE id=${row.account_id}`)[0]!.canonical_address);
     if(published.did!==row.did||published.identityDidKey!==row.new_identity_public_key||published.serviceBase!==this.serviceBase||
       !equal(published.representation,row.binding_cose)||!equal(published.digest,row.binding_digest))throw new Error("Published binding does not match the committed custody transition");
@@ -421,14 +422,15 @@ export class SameProviderCustodyTransition {
       SELECT id,cose,representation_digest,selected_at,published_at FROM address_bindings WHERE account_id=${accountId} ORDER BY created_at,id`;
     return {revisions,bindings};
   }
-  private async row(id:string) {
-    const row=(await this.sql<TransitionRow[]>`SELECT * FROM custody_transition_preparations WHERE transition_id=${id}`)[0];
+  private async row(accountId:string,id:string) {
+    const row=(await this.sql<TransitionRow[]>`SELECT * FROM custody_transition_preparations WHERE transition_id=${id} AND account_id=${accountId}`)[0];
     if(!row)throw new Error("Custody transition does not exist");return row;
   }
   private preparation(row:TransitionRow):CustodyTransitionPreparation {
     const state=parsedState(row.expected_state);
     return {transitionId:row.transition_id,accountId:row.account_id,did:row.did,direction:row.direction,
       ownerRecoveryKey:row.owner_recovery_public_key,oldIdentityKey:row.old_identity_public_key,newIdentityKey:row.new_identity_public_key,
+      currentState:def.documentData.parse({...state,verificationMethods:{...state.verificationMethods,"hail-identity":row.old_identity_public_key}}),
       unsignedOperation:def.unsignedOperation.parse({type:"plc_operation",prev:row.previous_operation_cid,rotationKeys:state.rotationKeys,
         verificationMethods:state.verificationMethods,alsoKnownAs:state.alsoKnownAs,services:state.services}),
       previousOperationCid:row.previous_operation_cid,historyCheckpointDigest:row.history_checkpoint_digest,bindingCose:row.binding_cose,

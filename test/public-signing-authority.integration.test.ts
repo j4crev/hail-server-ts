@@ -134,6 +134,9 @@ it.skipIf(!process.env.DATABASE_URL)(
       await expect(db.sql`DELETE FROM public_signing_authority_evidence`).rejects.toThrow("immutable");
       const connection = await db.sql.reserve();
       try {
+        if ((await connection`SELECT version FROM schema_migrations WHERE version=48`).length) await connection.unsafe(
+          await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql", import.meta.url)).text(),
+        );
         await connection.unsafe(
           await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql", import.meta.url)).text(),
         );

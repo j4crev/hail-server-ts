@@ -13,8 +13,11 @@ import { handshakeDigest, sameDigest, signHandshake, verifyHandshake,
   type TransferOffer, type TransferAddressSelection, type TransferReservation } from "./handshake.js";
 import { managedHandshakeDigest, signManagedProviderHandshake, verifyManagedOwnerHandshake,
   verifyManagedProviderHandshake, type ManagedTransferGrant, type ManagedTransferOffer,
+  type ManagedTransferReservation, type ManagedTransferFenceRequest,
   type SignedManagedHandshake } from "./managed-handshake.js";
 import { decodeDeterministic } from "@hailproto/codec";
+import { createWebCryptoSigner, signPayload, type HailAddressBinding } from "@hailproto/codec";
+import { canonicalizeHailAddress } from "../identity/address.js";
 
 export interface PreparedTargetKeys {
   transferId: string;
@@ -152,15 +155,15 @@ export class PreparedMigrationTarget {
     const acknowledgement = await verifyManagedProviderHandshake(acknowledgementSigned,
       "hail.managed-transfer-acknowledgement", state.messagingDidKey);
     const now = Math.floor(Date.now() / 1000);
+    const sourceKeys=new Set([ownerRecoveryKey,state.identityDidKey,state.messagingDidKey,...data.rotationKeys]);
     if (grant.issued_at > now + 300 || grant.expires_at <= now || acknowledgement.issued_at > now + 300 ||
       acknowledgement.expires_at <= now || acknowledgement.expires_at !== grant.expires_at ||
       acknowledgement.did !== grant.did || acknowledgement.nonce !== grant.nonce ||
       acknowledgement.source_service_base !== grant.source_service_base ||
       acknowledgement.destination_service_base !== grant.destination_service_base ||
       !Buffer.from(acknowledgement.grant_digest).equals(Buffer.from(managedHandshakeDigest(grantSigned.payloadBytes))) ||
-      [ownerRecoveryKey, grant.source_identity_key].includes(prepared.identityPublicKey) ||
-      [ownerRecoveryKey, grant.source_identity_key].includes(prepared.messagingPublicKey) ||
-      [ownerRecoveryKey, grant.source_identity_key].includes(prepared.rotationPublicKey)) {
+      sourceKeys.has(prepared.identityPublicKey) || sourceKeys.has(prepared.messagingPublicKey) ||
+      sourceKeys.has(prepared.rotationPublicKey)) {
       throw new Error("Managed destination roles are not fresh against source authority");
     }
     const offer: ManagedTransferOffer = {type:"hail.managed-transfer-offer",version:1,did:grant.did,nonce:grant.nonce,
@@ -176,6 +179,49 @@ export class PreparedMigrationTarget {
     const keyBytes = await this.encryptor.decrypt(prepared.transferId,"hail-messaging","ed25519",row.messaging_public_key,
       {ciphertext:row.messaging_private_ciphertext,nonce:row.messaging_nonce,encryptionVersion:1,kekId:"poc-v1"});
     try { return signManagedProviderHandshake(offer,await importEd25519PrivateKey(keyBytes)); }
+    finally { keyBytes.fill(0); }
+  }
+
+  async signManagedArtifact(prepared: PreparedTargetKeys,
+    value: ManagedTransferReservation | ManagedTransferFenceRequest): Promise<SignedManagedHandshake> {
+    if (prepared.custodyProfile !== "managed" || !prepared.identityPublicKey ||
+      value.did !== prepared.did || value.transfer_id !== prepared.transferId ||
+      value.destination_rotation_key !== prepared.rotationPublicKey ||
+      value.destination_identity_key !== prepared.identityPublicKey ||
+      value.destination_messaging_key !== prepared.messagingPublicKey) {
+      throw new Error("Managed artifact does not match prepared destination roles");
+    }
+    await this.assertOwnership(prepared);
+    const row = (await this.sql<TargetKeyRow[]>`SELECT messaging_public_key,messaging_private_ciphertext,messaging_nonce
+      FROM prepared_migration_target_keys WHERE transfer_id=${prepared.transferId}`)[0];
+    if (!row || row.messaging_public_key !== prepared.messagingPublicKey) throw new Error("Managed target key missing");
+    const keyBytes = await this.encryptor.decrypt(prepared.transferId, "hail-messaging", "ed25519",
+      row.messaging_public_key, { ciphertext: row.messaging_private_ciphertext, nonce: row.messaging_nonce,
+        encryptionVersion: 1, kekId: "poc-v1" });
+    try { return signManagedProviderHandshake(value, await importEd25519PrivateKey(keyBytes)); }
+    finally { keyBytes.fill(0); }
+  }
+
+  async createManagedDestinationBinding(prepared: PreparedTargetKeys, address: string,
+    issuedAt: number): Promise<Uint8Array> {
+    if (prepared.custodyProfile !== "managed" || !prepared.identityPublicKey ||
+      canonicalizeHailAddress(address) !== address ||
+      address.slice(address.indexOf("@") + 1) !== new URL(prepared.destinationServiceBase).hostname ||
+      !Number.isSafeInteger(issuedAt) || issuedAt < 0) {
+      throw new Error("Managed destination binding does not match prepared identity and domain");
+    }
+    await this.assertOwnership(prepared);
+    const row = (await this.sql<TargetKeyRow[]>`SELECT identity_public_key,identity_private_ciphertext,identity_nonce
+      FROM prepared_migration_target_keys WHERE transfer_id=${prepared.transferId}`)[0];
+    if (!row?.identity_public_key || !row.identity_private_ciphertext || !row.identity_nonce ||
+      row.identity_public_key !== prepared.identityPublicKey) throw new Error("Managed target identity key missing");
+    const keyBytes = await this.encryptor.decrypt(prepared.transferId, "hail-identity", "ed25519",
+      row.identity_public_key, { ciphertext: row.identity_private_ciphertext, nonce: row.identity_nonce,
+        encryptionVersion: 1, kekId: "poc-v1" });
+    const binding: HailAddressBinding = { type: "hail.address-binding", version: 1, address, did: prepared.did,
+      issued_at: issuedAt, expires_at: issuedAt + 90 * 86400, key_id: `${prepared.did}#hail-identity` };
+    try { return signPayload("hail.address-binding", binding,
+      createWebCryptoSigner(binding.key_id, await importEd25519PrivateKey(keyBytes))); }
     finally { keyBytes.fill(0); }
   }
 

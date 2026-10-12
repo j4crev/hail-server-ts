@@ -584,6 +584,8 @@ integration("private PLC transfer between disposable POC providers", () => {
       const invalidation=await invalidating;expect(await withFreshServingGenerations(target.sql,()=>targetAbandon.invalidate(intent))).toEqual(invalidation);
       expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence`).toHaveLength(0);
       const rollbackTarget=await target.sql.reserve();try {
+        if((await rollbackTarget`SELECT version FROM schema_migrations WHERE version=48`).length)
+          await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql",import.meta.url)).text());
         await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
         await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());
         await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text());

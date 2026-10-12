@@ -14,7 +14,7 @@ import type { DeliveryStatusSigner } from "./delivery/status.js";
 import { registerDeliveryStatusRoutes } from "./delivery/status-routes.js";
 import type { DeliveryStatusReceiver } from "./delivery/status-receiver.js";
 import { ProtectedResponseSchedule } from "./http/protected-schedule.js";
-import { registerTransferRoutes } from "./migration/routes.js";
+import { registerManagedTransferRoutes,registerTransferRoutes } from "./migration/routes.js";
 import type { TransferInvitationReceiver } from "./migration/invitation-receiver.js";
 import type { TransferAddressReservation } from "./migration/address-selection.js";
 import type { TransferFinalRequestPublisher } from "./migration/final-request-publisher.js";
@@ -36,6 +36,11 @@ import type { SQL } from "bun";
 import type { AccountBinding } from "./accounts/binding.js";
 import type { AccountTransfer } from "./accounts/transfer.js";
 import type { PrivatePocTransferCompletion } from "./migration/poc-completion.js";
+import type { ManagedTransferInvitationReceiver } from "./migration/managed-invitation-receiver.js";
+import type { ManagedTransferAddressReservation } from "./migration/managed-address-selection.js";
+import type { ManagedTransferFencePublisher } from "./migration/managed-fence-publisher.js";
+import type { ManagedMigrationFenceService } from "./migration/managed-fence.js";
+import type { ManagedAccountTransfer } from "./accounts/managed-transfer.js";
 import {withFreshServingGenerations} from "./db/serving.js";
 
 export interface ReadinessResult {
@@ -60,8 +65,12 @@ export interface AppDependencies {
   transferCancellation?: TransferCancellationService;
   transferCancellationReceiver?: TransferCancellationReceiver;
   transferCompletion?:PrivatePocTransferCompletion;
+  managedTransferInvitationReceiver?:ManagedTransferInvitationReceiver;
+  managedTransferAddressReservation?:ManagedTransferAddressReservation;
+  managedTransferFencePublisher?:ManagedTransferFencePublisher;
+  managedMigrationFence?:ManagedMigrationFenceService;
   accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging;
-    binding?:AccountBinding;transfer?:AccountTransfer;custodyTransition?:SameProviderCustodyTransition };
+    binding?:AccountBinding;transfer?:AccountTransfer;custodyTransition?:SameProviderCustodyTransition;managedTransfer?:ManagedAccountTransfer };
   selfServiceOnboarding?: SelfServiceOnboarding;
   accountAccess?: { access: AccountAccess; sql: SQL };
   servingSql?:SQL;
@@ -84,8 +93,8 @@ export function createApp(
   if (dependencies.accountAccess) registerAccountAccess(app, dependencies.accountAccess.access, dependencies.accountAccess.sql);
 
   if (dependencies.accountApi) {
-    const { accounts, grants, service, messaging, binding,transfer,custodyTransition } = dependencies.accountApi;
-    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding,transfer,custodyTransition);
+    const { accounts, grants, service, messaging, binding,transfer,custodyTransition,managedTransfer } = dependencies.accountApi;
+    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding,transfer,custodyTransition,managedTransfer);
   }
 
   if (dependencies.discoveryStore) {
@@ -106,6 +115,11 @@ export function createApp(
     dependencies.transferAddressReservation, dependencies.migrationFence, dependencies.transferFinalRequestPublisher,
     dependencies.transferGrantSubmission, dependencies.transferRateLimit,
     dependencies.transferCancellation, dependencies.transferCancellationReceiver,dependencies.transferCompletion);
+  if(dependencies.managedTransferInvitationReceiver||dependencies.managedTransferAddressReservation||
+    dependencies.managedTransferFencePublisher||dependencies.managedMigrationFence)registerManagedTransferRoutes(app,
+    dependencies.managedTransferInvitationReceiver,dependencies.transferRateLimit,
+    dependencies.managedTransferAddressReservation,dependencies.managedTransferFencePublisher,
+    dependencies.managedMigrationFence);
 
   app.get("/health/live", (context) =>
     context.json({

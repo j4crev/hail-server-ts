@@ -936,6 +936,8 @@ integration("fenced transfer and concurrent cutover", () => {
     finally{await target.sql`UPDATE portable_cutover_observations SET state='eligible' WHERE transfer_id=${fence.transferId}`;}
     const rollbackConnection=await target.sql.reserve();
     try {
+      if((await rollbackConnection`SELECT version FROM schema_migrations WHERE version=48`).length)
+        await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql",import.meta.url)).text());
       await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
       await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());
       await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text());

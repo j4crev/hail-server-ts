@@ -10,6 +10,7 @@ import { BindingError, type AccountBinding } from "./binding.js";
 import { AccountTransferError,type AccountTransfer } from "./transfer.js";
 import {withServingGeneration} from "../db/serving.js";
 import type { SameProviderCustodyTransition } from "./custody-transition.js";
+import type { ManagedAccountTransfer } from "./managed-transfer.js";
 
 const GRANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BYTES = 262_144;
@@ -39,7 +40,7 @@ export async function accountRequestBytes(request: Request,limit=MAX_BYTES): Pro
 
 export function registerAccountApiRoutes(app: Hono, accounts: AccountApiRepository,
   grants: GrantRepository, service: GrantService, provider: string, messaging?:AccountMessaging, binding?:AccountBinding,
-  transfer?:AccountTransfer,custodyTransition?:SameProviderCustodyTransition): void {
+  transfer?:AccountTransfer,custodyTransition?:SameProviderCustodyTransition,managedTransfer?:ManagedAccountTransfer): void {
   let window = Date.now();
   let requests = 0;
   const handle = async (context: Context, grantId: string | null, action?: string):Promise<Response> => {
@@ -104,7 +105,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
           typeof input.approval!=="string"||typeof input.signature!=="string")return problem(400);
         try {const operation=decodeBase64Url(input.operation),approval=decodeBase64Url(input.approval),signature=decodeBase64Url(input.signature);
           if(encodeBase64Url(operation)!==input.operation||encodeBase64Url(approval)!==input.approval||encodeBase64Url(signature)!==input.signature)return problem(400);
-          return context.json(await custodyTransition.commit(input.transitionId,operation,approval,signature));
+          return context.json(await custodyTransition.commit(session.account_id,input.transitionId,operation,approval,signature));
         } catch(error) {if(error instanceof SyntaxError||error instanceof HailCodecError)return problem(400);throw error;}
       }
       if(action==="transfer-status"||action==="transfer-offer"||action==="transfer-cancel"||action==="transfer-export") {
@@ -117,6 +118,19 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
         let input:Record<string,unknown>;try {input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes)) as Record<string,unknown>;
           if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Invalid object");}catch{return problem(400);}
         return context.json(action==="transfer-offer"?await transfer.offer(session,input):action==="transfer-export"?await transfer.exportSnapshot(session,input):await transfer.cancel(session,input));
+      }
+      if(action==="managed-transfer-status"||action==="managed-transfer-offer") {
+        if(!session.scopes.includes(action==="managed-transfer-status"?"account:read":"account:write"))return problem(403);
+        if(!managedTransfer)return problem(503);
+        if(action==="managed-transfer-status"){
+          if(method!=="GET")return problem(405);return context.json(await managedTransfer.status(session));
+        }
+        if(method!=="POST")return problem(405);
+        if(context.req.header("Content-Type")!=="application/json"||context.req.header("Content-Encoding")!==undefined)return problem(415);
+        const bytes=await accountRequestBytes(context.req.raw);if(!bytes||bytes.length>16384)return problem(413);
+        let input:Record<string,unknown>;try{input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes)) as Record<string,unknown>;
+          if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Invalid object");}catch{return problem(400);}
+        return context.json(await managedTransfer.offer(session,input));
       }
       if(action==="update-proposal"||action==="managed-update") {
         if(!session.scopes.includes("grants:write"))return problem(403);
@@ -298,6 +312,8 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
   app.all("/api/v1/account/transfers/offer",context=>handle(context,null,"transfer-offer"));
   app.all("/api/v1/account/transfers/cancel",context=>handle(context,null,"transfer-cancel"));
   app.all("/api/v1/account/transfers/export",context=>handle(context,null,"transfer-export"));
+  app.all("/api/v1/account/transfers/managed",context=>handle(context,null,"managed-transfer-status"));
+  app.all("/api/v1/account/transfers/managed/offer",context=>handle(context,null,"managed-transfer-offer"));
   app.all("/api/v1/account/custody/managed",context=>handle(context,null,"custody-prepare"));
   app.all("/api/v1/account/custody/owner-controlled/review",context=>handle(context,null,"custody-review-owner"));
   app.all("/api/v1/account/custody/owner-controlled",context=>handle(context,null,"custody-prepare-owner"));

@@ -31,6 +31,16 @@ export function parseInvitationWire(bytes: Uint8Array): { grant: SignedHandshake
     !("grant" in row) || !("invitation" in row)) throw new Error("Invalid transfer invitation envelope");
   return { grant: decodeSignedRecord(row.grant), invitation: decodeSignedRecord(row.invitation) };
 }
+export function managedInvitationWire(grant: SignedHandshake, acknowledgement: SignedHandshake): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({grant:encodeSignedRecord(grant),
+    acknowledgement:encodeSignedRecord(acknowledgement)}));
+}
+export function parseManagedInvitationWire(bytes:Uint8Array):{grant:SignedHandshake;acknowledgement:SignedHandshake} {
+  const row:unknown=parseWire(bytes);
+  if(!row||typeof row!=="object"||Array.isArray(row)||Object.keys(row).length!==2||
+    !("grant" in row)||!("acknowledgement" in row))throw new Error("Invalid managed transfer invitation envelope");
+  return {grant:decodeSignedRecord(row.grant),acknowledgement:decodeSignedRecord(row.acknowledgement)};
+}
 export function requestWire(request: SignedHandshake): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(encodeSignedRecord(request)));
 }
