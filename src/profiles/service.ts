@@ -13,7 +13,7 @@ import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import { importEd25519PrivateKey } from "../identity/keys.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
 import type { AccountKeyRecord, AccountRecord } from "../onboarding/repository.js";
-import type { HailDidResolver } from "../plc/resolver.js";
+import type { HailDidResolver, PlcResolutionEvidence } from "../plc/resolver.js";
 import type { StoredSenderProfile } from "./store.js";
 
 export interface SenderProfileDefinition {
@@ -30,6 +30,7 @@ export interface SenderProfileRepository {
   insertSenderProfile(
     profile: StoredSenderProfile,
     expectedPreviousRevision: number,
+    authority: { evidence: PlcResolutionEvidence; serviceBase: string },
   ): Promise<void>;
 }
 
@@ -165,7 +166,10 @@ export class SenderProfileService {
       createdAt: instant,
     };
     try {
-      await this.repository.insertSenderProfile(profile, revision - 1);
+      await this.repository.insertSenderProfile(profile, revision - 1, {
+        evidence: resolved.evidence,
+        serviceBase: this.expectedServiceBase,
+      });
       return profile;
     } catch (error) {
       const winner = await this.repository.getLatestSenderProfile(account.id);

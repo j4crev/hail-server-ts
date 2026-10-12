@@ -14,7 +14,7 @@ const MAX_PLC_RESPONSE_BYTES = 1_048_576;
 const PLC_READ_TIMEOUT_MS = 5_000;
 export type PlcReadFetch = (url: string, init: RequestInit) => Promise<Response>;
 
-function withAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+export function withAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
     const aborted = () => { signal.removeEventListener("abort", aborted); reject(signal.reason); };

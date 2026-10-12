@@ -8,6 +8,7 @@ import type { KeyEncryptor } from "../identity/key-encryption.js";
 import { importEd25519PrivateKey } from "../identity/keys.js";
 import type { AccountKeyRecord } from "../onboarding/repository.js";
 import type { HailDidResolver } from "../plc/resolver.js";
+import { retainPublicSigningAuthority } from "../plc/signing-authority.js";
 import { deliveryDeadline } from "./repository.js";
 
 interface StatusRow {
@@ -123,6 +124,16 @@ export class DeliveryStatusSigner {
           ${JSON.stringify(resolved.evidence.log)}::jsonb)
         ON CONFLICT (sender_did, message_id, revision, signing_public_key) DO NOTHING
       `;
+      await retainPublicSigningAuthority(tx, {
+        actionType: "delivery-status",
+        localAccountId: row.local_account_id,
+        did: row.recipient_did,
+        role: "hail-messaging",
+        key: key.publicKey,
+        serviceBase: this.serviceBase,
+        representation: cose,
+        evidence: resolved.evidence,
+      });
     });
     return cose;
   }

@@ -4,8 +4,7 @@ import { KeyEncryptor } from "../identity/key-encryption.js";
 import { importEd25519PrivateKey } from "../identity/keys.js";
 import { TransferInvitationService } from "../migration/handshake.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 import { readTransferRecord, writeTransferRecord } from "./transfer-record.js";
 import { decodeDeterministic } from "@hailproto/codec";
 import { SafeHttpsTransport } from "../discovery/safe-fetch.js";
@@ -31,7 +30,7 @@ try {
   const bytes = await new KeyEncryptor(config.keyEncryptionKey).decrypt(account[0].id,
     key.role, key.algorithm, key.publicKey, key);
   try {
-    const resolver = new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl));
+    const resolver = createHailDidResolver(config,database.sql);
     const invitation = await new TransferInvitationService(database.sql, resolver,
       config.hailServiceBase).issue(grant, await importEd25519PrivateKey(bytes));
     await writeTransferRecord(invitationFile, invitation);

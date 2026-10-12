@@ -15,6 +15,7 @@ import type {
   SignedGrantRevisionInput,
 } from "./store.js";
 import { restrictsAuthorization } from "./revision.js";
+import { retainPublicGrantAuthority } from "../plc/grant-authority.js";
 
 export class GrantConflictError extends Error {}
 
@@ -287,6 +288,7 @@ export class GrantRepository implements GrantStore {
         )
       `;
       await this.insertRevision(transaction, revision);
+      await retainPublicGrantAuthority(transaction,revision,consent);
       await transaction`
         INSERT INTO grant_consent_evidence (
           grant_id, revision, grantee_address, binding_cose, binding_digest,
@@ -362,6 +364,7 @@ export class GrantRepository implements GrantStore {
       `;
       if (updated.length !== 1) throw new GrantConflictError("Authoritative Grant revision conflict");
       await this.insertRevision(transaction, revision);
+      await retainPublicGrantAuthority(transaction,revision,input.consent);
       if(input.consent) {
         const consent=input.consent;
         await transaction`INSERT INTO grant_consent_evidence (grant_id,revision,grantee_address,binding_cose,binding_digest,
@@ -487,6 +490,7 @@ export class GrantRepository implements GrantStore {
         await this.insertRevision(transaction, revision);
       }
 
+      await retainPublicGrantAuthority(transaction,revision);
       const rows = await transaction<GrantRow[]>`
         SELECT ${transaction.unsafe(GRANT_COLUMNS)}
         FROM grant_lineages AS lineage

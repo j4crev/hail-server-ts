@@ -9,7 +9,7 @@ import { GrantService, type GrantDefinition } from "../grants/service.js";
 import { KeyEncryptor } from "../identity/key-encryption.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
 import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 import { SenderProfileVerifier } from "../profiles/verifier.js";
 
 function definition(value: unknown): GrantDefinition {
@@ -67,7 +67,7 @@ const database = new ProviderDatabase(config.databaseUrl);
 try {
   await database.migrate();
   const plc = createPlcDirectoryClient(config.plcDirectoryUrl);
-  const resolver = new PlcHailDidResolver(plc);
+  const resolver = createHailDidResolver(config,database.sql);
   const transport = new SafeHttpsTransport();
   const accounts = new OnboardingRepository(database.sql);
   const grant = await new GrantService(
@@ -75,7 +75,7 @@ try {
     new GrantRepository(database.sql),
     new KeyEncryptor(config.keyEncryptionKey),
     resolver,
-    new AddressVerifier(plc, transport.fetch, transport.validateTarget),
+    new AddressVerifier(plc, transport.fetch, transport.validateTarget,undefined,resolver),
     new SenderProfileVerifier(
       resolver,
       transport.fetch,

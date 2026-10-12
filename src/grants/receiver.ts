@@ -92,6 +92,7 @@ export class GrantReceiver {
       account: AccountRecord;
       identityDidKey: string;
       signingPlcEvidence: Awaited<ReturnType<HailDidResolver["resolve"]>>["evidence"];
+      recipientEvidence: Awaited<ReturnType<HailDidResolver["resolve"]>>["evidence"];
     };
     try {
       const inspected = inspectSignedPayload("hail.grant", representation);
@@ -125,13 +126,14 @@ export class GrantReceiver {
         account,
         identityDidKey: grantor.identityDidKey,
         signingPlcEvidence: grantor.evidence,
+        recipientEvidence: grantee.evidence,
       };
     } catch (error) {
       if (error instanceof GrantReceiveError && error.status === 421) throw error;
       throw new GrantReceiveError(400, "Bad Request", false);
     }
 
-    const { payload, account, identityDidKey, signingPlcEvidence } = authenticated;
+    const { payload, account, identityDidKey, signingPlcEvidence,recipientEvidence } = authenticated;
     const wallClock = Math.floor(this.now().getTime() / 1_000);
     if (
       payload.issued_at > wallClock + 300 ||
@@ -203,6 +205,7 @@ export class GrantReceiver {
         digest,
         signingPublicKey: identityDidKey,
         signingPlcEvidence,
+        recipientEvidence,recipientServiceBase:this.expectedServiceBase,
       });
     } catch (error) {
       if (conflictFromPersistence(error)) {

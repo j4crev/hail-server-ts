@@ -10,6 +10,8 @@ import type {
   VerifiedSenderProfile,
   VerifiedSenderProfileStore,
 } from "../profiles/store.js";
+import type { PlcResolutionEvidence } from "../plc/resolver.js";
+import { retainPublicSigningAuthority } from "../plc/signing-authority.js";
 
 export type OnboardingState =
   | "reserved"
@@ -411,6 +413,7 @@ export class OnboardingRepository
   async insertSenderProfile(
     profile: StoredSenderProfile,
     expectedPreviousRevision: number,
+    authority?: { evidence: PlcResolutionEvidence; serviceBase: string },
   ): Promise<void> {
     await this.sql.begin(async (transaction) => {
       const accounts = await transaction<Pick<AccountRow, "did" | "onboarding_state">[]>`
@@ -452,6 +455,18 @@ export class OnboardingRepository
           ${profile.signingPublicKey}, ${profile.updatedAt}
         )
       `;
+      if (authority) {
+        await retainPublicSigningAuthority(transaction, {
+          actionType: "sender-profile",
+          localAccountId: profile.accountId,
+          did: profile.did,
+          role: "hail-messaging",
+          key: profile.signingPublicKey,
+          serviceBase: authority.serviceBase,
+          representation: profile.cose,
+          evidence: authority.evidence,
+        });
+      }
     });
   }
 

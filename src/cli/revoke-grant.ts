@@ -5,8 +5,7 @@ import { GrantRepository } from "../grants/repository.js";
 import { GrantService } from "../grants/service.js";
 import { KeyEncryptor } from "../identity/key-encryption.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 
 const grantorAddress = Bun.argv[2];
 const grantId = Bun.argv[3];
@@ -23,7 +22,7 @@ try {
     accounts,
     new GrantRepository(database.sql),
     new KeyEncryptor(config.keyEncryptionKey),
-    new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl)),
+    createHailDidResolver(config,database.sql),
     { verify: async () => Promise.reject(new Error("Address verification is not used for revocation")) },
     { verify: async () => Promise.reject(new Error("Profile verification is not used for revocation")) },
     config.hailServiceBase,

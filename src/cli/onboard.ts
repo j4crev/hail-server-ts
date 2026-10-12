@@ -11,6 +11,7 @@ if (!address) {
 }
 
 const config = loadConfig();
+if (config.publicPlcAuthority) throw new Error("Strict public onboarding requires the owner-key/monitor ceremony; custodial prototype onboarding is not that ceremony");
 const database = new ProviderDatabase(config.databaseUrl);
 
 try {

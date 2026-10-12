@@ -6,8 +6,7 @@ import { EnvelopeService } from "../envelopes/service.js";
 import { GrantRepository } from "../grants/repository.js";
 import { KeyEncryptor } from "../identity/key-encryption.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 
 const [sender, replyTo, digest, flag, untilText] = Bun.argv.slice(2);
 if (!sender || !replyTo || !digest ||
@@ -24,7 +23,7 @@ try {
   const result = await new EnvelopeService(
     new OnboardingRepository(database.sql), new GrantRepository(database.sql),
     new EnvelopeRepository(database.sql), new KeyEncryptor(config.keyEncryptionKey),
-    new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl)), config.hailServiceBase,
+    createHailDidResolver(config,database.sql), config.hailServiceBase,
   ).createReply(sender, replyTo, digest, replyUntil);
   console.info(JSON.stringify({ messageId: result.payload.message_id,
     replyTo, envelopeDigest: encodeBase64Url(result.digest), destination: result.destination,

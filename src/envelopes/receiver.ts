@@ -50,6 +50,8 @@ export class EnvelopeReceiver {
         localAccountId: account.id,
         signingPublicKey: sender.messagingDidKey,
         evidence: sender.evidence,
+        recipientEvidence: recipient.evidence,
+        recipientServiceBase: this.serviceBase,
         now: this.now(),
       }, signal);
     } catch {

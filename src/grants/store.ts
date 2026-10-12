@@ -13,6 +13,9 @@ export interface SignedGrantRevision {
   readonly digest: Uint8Array;
   readonly signingPublicKey: string;
   readonly signingPlcEvidence: PlcResolutionEvidence;
+  readonly expectedServiceBase?: string;
+  readonly recipientEvidence?: PlcResolutionEvidence;
+  readonly recipientServiceBase?: string;
   readonly receivedAt: Date;
 }
 
@@ -47,6 +50,8 @@ export interface ReceivedGrantRevision {
   readonly digest: Uint8Array;
   readonly signingPublicKey: string;
   readonly signingPlcEvidence: PlcResolutionEvidence;
+  readonly recipientEvidence?: PlcResolutionEvidence;
+  readonly recipientServiceBase?: string;
 }
 
 export interface GrantPublicationClaim {

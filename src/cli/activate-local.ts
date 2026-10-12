@@ -13,6 +13,7 @@ if (!address) {
 }
 
 const config = loadConfig();
+if (config.publicPlcAuthority) throw new Error("Local prototype activation cannot use strict public authority");
 const database = new ProviderDatabase(config.databaseUrl);
 
 try {

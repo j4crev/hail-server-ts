@@ -1,3 +1,6 @@
+import { publicPlcAuthorityConfig } from "./plc/public-resolver.js";
+import type { PublicPlcAuthorityConfig } from "./plc/observers.js";
+
 export type NodeEnvironment = "development" | "test" | "production";
 
 export interface AppConfig {
@@ -9,6 +12,7 @@ export interface AppConfig {
   plcDirectoryUrl: string;
   databaseUrl: string;
   keyEncryptionKey: string;
+  publicPlcAuthority?: PublicPlcAuthorityConfig;
 }
 
 type Environment = Record<string, string | undefined>;
@@ -114,6 +118,7 @@ export function loadConfig(environment: Environment = Bun.env): AppConfig {
     throw new Error("KEY_ENCRYPTION_KEY must be a canonical 32-byte unpadded base64url value");
   }
 
+  const publicPlcAuthority = publicPlcAuthorityConfig(environment, plcDirectoryUrl, publicOrigin);
   return {
     nodeEnv,
     port,
@@ -123,6 +128,7 @@ export function loadConfig(environment: Environment = Bun.env): AppConfig {
     plcDirectoryUrl,
     databaseUrl,
     keyEncryptionKey,
+    ...(publicPlcAuthority ? { publicPlcAuthority } : {}),
   };
 }
 import { decodeBase64Url } from "@hailproto/codec";

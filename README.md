@@ -57,6 +57,71 @@ destination after transfer.
 
 ### HTTP contract
 
+Milestone 7's candidate [PLC read-evidence policy](https://github.com/j4crev/hailproto/blob/main/spec/plc-read-evidence.md)
+strengthens the public cutover library with complete canonical/audit agreement,
+explicit independent-reader/operator configuration, reviewed v2 monitor bootstrap
+evidence and five-minute freshness. Use `createIndependentPlcObserver(origin,
+operator)` and pass the reviewed source/destination operator IDs as the fourth
+`PortableCutoverGate` constructor argument. Legacy v1 monitor reports, private
+registration evidence and private-Poc observation promotion cannot authorize
+public cutover. The private POC path retains its separate gate. Migration 44 adds
+an opt-in public signup route, but no live deployment is enabled by fixture tests. See
+[verification and remaining gates](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone7-production-gate.md#read-evidence-and-monitor-bootstrap-slice).
+
+Migration **40** adds full immutable public cutover evidence and a separate
+selection sealed by the activation transaction. Both reader histories/documents,
+canonical operation bytes, bootstrap state and exact monitor proof are retained
+in an 8 MiB bounded content-addressed bundle; no credentials/private keys/message
+bodies are included. Public activation/active retries require the exact retained
+correlation, and older digest-only public writers cannot activate on the expanded
+schema. Existing private-POC paths and signed row shapes are preserved. The guarded
+`migrations/rollback/0040_public_cutover_evidence.sql` refuses rollback after any
+new proof is retained; older public activations are not retroactively supplied
+with fabricated evidence. See [retention proof](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone7-production-gate.md#durable-provider-cutover-evidence-slice-migration-40).
+
+Migration **41** adds an opt-in routine `strict-public-v1` resolver and immutable
+resolution/envelope-authority history. It uses fresh complete agreement from both
+readers on every call, with no result cache or degraded fallback, and persists
+the read bundle before returning keys. Inbound envelope admission binds both
+authority digests to the exact signed representation atomically; stale (>30 s),
+mixed or mismatched evidence cannot enqueue work. Other services use the same
+resolver. Migrations 42-43 add action-bound Grant, binding, profile and status history.
+
+```dotenv
+PLC_DIRECTORY_URL=https://plc.directory
+PLC_AUTHORITY_PROFILE=strict-public-v1
+PLC_PUBLIC_READERS=[{"origin":"https://reader-one.example.com","operator":"reader-one"},{"origin":"https://reader-two.example.com","operator":"reader-two"}]
+PLC_PROVIDER_OPERATORS=["provider-operator"]
+```
+
+These are configuration examples, not independently verified operators/hosts.
+Reader/operator declarations must be distinct and outside the provider. Absence
+of the authority profile preserves the POC baseline; orphaned/invalid public
+declarations are refused. Use one consistent runtime for all serving/worker/tools
+when enabling strict authority; existing public writers do not gain verified
+evidence merely because schema 41 is installed. Normal operator CLIs and address
+discovery share the factory; private-POC commands retain their registry guard.
+Prototype operator `onboard` and `activate:local/public` remain private/legacy tools
+and refuse strict mode. Set `PUBLIC_SELF_SERVICE_ONBOARDING=true` only with the strict
+profile to enable the migration-44 owner-key/monitor HTTP ceremony; do not also enable
+the private POC signup flag.
+
+Migration **44** retains public preparations separately from private-POC records.
+The owner signs the exact genesis with top recovery authority; registration writes
+only to `https://plc.directory`, reconciles ambiguous responses, and returns the exact
+DID/CID for reviewed monitor enrollment. A retry carrying the genesis-specific monitor
+attestation atomically seals custody, strict two-reader evidence, selected binding and
+activation before issuing credentials. Guarded rollback refuses retained preparations
+or evidence. This is implementation evidence, not proof that configured readers,
+monitor, backup or alert infrastructure are independently operated.
+
+`migrations/rollback/0041_public_plc_authority.sql` permits rollback only before
+new evidence is retained and without later migrations. Histories reference stable
+IDs rather than volatile working rows, but their transport in a future signed
+snapshot remains a separate profile change. Current reported PLC authority is
+not recovery-window finality or proof of owner intent. See the
+[routine authority candidate and boundaries](https://github.com/j4crev/hailproto/blob/main/spec/plc-read-evidence.md#routine-strict-public-v1-authority).
+
 The consolidated [reference account API v1 / hailp CLI contract](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/cli-contract.md)
 defines compatibility, output/error semantics and bounded read convenience.
 The client version is 0.1.0 and its JSON adds `cliContractVersion: 1`; provider
@@ -387,6 +452,14 @@ address/PLC evidence before issuing initial full-access credentials. This
 abuse protection or public-registry onboarding. Managed evidence is separate
 from portable custody; portable key-separation/transfer checks are not bypassed.
 
+`PUBLIC_SELF_SERVICE_ONBOARDING=true` selects the same resumable endpoint only when
+`PLC_AUTHORITY_PROFILE=strict-public-v1` and canonical `https://plc.directory` are
+configured. Preparation additionally binds a canonical external monitor origin/key.
+The first signed registration returns HTTP 202 with `did`, `operationCid` and
+`monitorRequired`; after reviewed monitor enrollment/backfill, retry with the signed
+onboarding attestation to activate and receive the credential. Exact state and signed
+artifacts must be retained between both calls.
+
 Additional account endpoints:
 
 | Path | Method/scope | Purpose |
@@ -425,10 +498,10 @@ managed profile lets the provider sign authorized identity operations while
 the account owner retains the top PLC recovery key. Both profiles are intended
 for people and agents.
 
-The current implementation has the account/Grant/message APIs, opt-in private
-signup with both custody profiles, federation/transfer routes and operator
-building blocks. Production/public signup, renewal/recovery and managed
-migration still need work. Extend the account boundary over existing services and
+The current implementation has the account/Grant/message APIs, opt-in private signup,
+and an opt-in strict-public owner/monitor ceremony for both custody profiles. Live
+independent deployment, public recovery, history transport and managed migration still
+need work. Extend the account boundary over existing services and
 transactions rather than treating administrator CLIs as client APIs. The
 [API and custody plan](https://github.com/j4crev/hailproto/blob/main/docs/production-portable-custody.md#api-first-provider-and-cli-clients)
 defines the first authenticated slice, profile-specific signing, isolation,

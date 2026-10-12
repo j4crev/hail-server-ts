@@ -181,6 +181,11 @@ const migrations: readonly Migration[] = [
   { version: 37, name: "generation-admission", url: new URL("../../migrations/0037_generation_admission.sql", import.meta.url) },
   { version: 38, name: "retired-import-history", url: new URL("../../migrations/0038_retired_import_history.sql", import.meta.url) },
   { version: 39, name: "transfer-abandonment", url: new URL("../../migrations/0039_transfer_abandonment.sql", import.meta.url) },
+  { version: 40, name: "public-cutover-evidence", url: new URL("../../migrations/0040_public_cutover_evidence.sql", import.meta.url) },
+  { version: 41, name: "public-plc-authority", url: new URL("../../migrations/0041_public_plc_authority.sql", import.meta.url) },
+  { version: 42, name: "public-grant-authority", url: new URL("../../migrations/0042_public_grant_authority.sql", import.meta.url) },
+  { version: 43, name: "public-signing-authority", url: new URL("../../migrations/0043_public_signing_authority.sql", import.meta.url) },
+  { version: 44, name: "public-onboarding", url: new URL("../../migrations/0044_public_onboarding.sql", import.meta.url) },
 ];
 
 export class ProviderDatabase {

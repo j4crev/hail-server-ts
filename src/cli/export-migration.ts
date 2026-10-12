@@ -6,8 +6,7 @@ import { KeyEncryptor } from "../identity/key-encryption.js";
 import { MigrationFenceService } from "../migration/fence.js";
 import { MigrationTransferService } from "../migration/transfer.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 
 const [did, transferId, outputFile] = Bun.argv.slice(2);
 if (!did || !transferId || !outputFile || Bun.argv.length !== 5) {
@@ -17,7 +16,7 @@ const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
 try {
   await database.migrate();
-  const resolver = new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl));
+  const resolver = createHailDidResolver(config,database.sql);
   const fence = await new MigrationFenceService(database.sql, resolver, config.hailServiceBase).get(did);
   if (!fence || fence.transferId !== transferId) throw new Error("Matching migration fence was not found");
   const snapshot = await new MigrationTransferService(database.sql, new OnboardingRepository(database.sql),

@@ -16,6 +16,7 @@ import { validateTransferManifest, type TransferManifest } from "./transfer.js";
 import { signActivationReceipt, type SignedActivationReceipt } from "./activation-receipt.js";
 import {replaceRetiredProjection} from "./return.js";
 import {materializedServingGeneration} from "../db/serving.js";
+import { evidenceHash, requirePublicCutoverEvidence } from "./public-cutover-evidence.js";
 
 type TableRow = Record<string, unknown>;
 
@@ -54,6 +55,13 @@ export class PortableMigrationActivation {
     const row = rows[0];
     if (!row || row.state !== "active" || !row.activated_at) {
       throw new Error("Only an active imported DID may acknowledge destination takeover");
+    }
+    if (this.profile === "public") {
+      const operation = (await this.sql<{ signed_plc_operation_bytes: Uint8Array }[]>`
+        SELECT signed_plc_operation_bytes FROM pending_migration_imports WHERE transfer_id=${transferId}`)[0];
+      if (!operation) throw new Error("Activated public operation is unavailable");
+      await requirePublicCutoverEvidence(this.sql, { transferId, did: row.did, manifestDigest: row.manifest_digest,
+        operationBytes: operation.signed_plc_operation_bytes, activatedAt: row.activated_at });
     }
     const resolved = await this.resolver.resolve(row.did);
     if (resolved.serviceBase !== this.serviceBase) throw new Error("PLC no longer designates the destination");
@@ -162,8 +170,8 @@ export class PortableMigrationActivation {
     } finally { rotationBytes.fill(0); messagingBytes.fill(0); }
     let materializedGeneration=1,reservedId="";
     const result=await this.sql.begin(async (tx) => {
-      const importsLocked = await tx<{ state: string }[]>`
-        SELECT state FROM pending_migration_imports WHERE transfer_id = ${transferId} FOR UPDATE
+      const importsLocked = await tx<{ state: string; manifest_bytes: Uint8Array; signed_plc_operation_bytes: Uint8Array }[]>`
+        SELECT state, manifest_bytes, signed_plc_operation_bytes FROM pending_migration_imports WHERE transfer_id = ${transferId} FOR UPDATE
       `;
       const preparedKeys = await tx<{ state: string }[]>`
         SELECT state FROM prepared_migration_target_keys WHERE transfer_id = ${transferId} FOR UPDATE
@@ -179,6 +187,19 @@ export class PortableMigrationActivation {
         gate[0].operation_cid !== assessment.operationCid ||
         Math.abs(this.now().getTime() - gate[0].last_seen_at.getTime()) > 30_000) {
         throw new Error("Current cutover eligibility was lost before materialization");
+      }
+      if (this.profile === "public") {
+        if (!assessment.evidenceDigest || !Buffer.from(importsLocked[0].manifest_bytes).equals(Buffer.from(pending.manifest_bytes)) ||
+          !Buffer.from(importsLocked[0].signed_plc_operation_bytes).equals(Buffer.from(pending.signed_plc_operation_bytes))) {
+          throw new Error("Public activation lost its exact verified import/evidence selection");
+        }
+        const retained = await requirePublicCutoverEvidence(tx, { transferId, did: manifest.did,
+          manifestDigest: evidenceHash(pending.manifest_bytes), operationBytes: pending.signed_plc_operation_bytes,
+          monitorPublicKey: manifest.tables.portable_custody_evidence[0]!.monitor_public_key as string,
+          digest: assessment.evidenceDigest, activatedAt: null });
+        if (retained.operation_cid !== assessment.operationCid || retained.verified_at.getTime() !== gate[0].last_seen_at.getTime()) {
+          throw new Error("Public activation evidence no longer matches the live assessment");
+        }
       }
       const accounts = await tx<{ id: string }[]>`SELECT id FROM provider_accounts WHERE did = ${manifest.did}`;
       const returning=accounts.length>0;

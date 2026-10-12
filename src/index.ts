@@ -3,7 +3,7 @@ import { loadConfig } from "./config.js";
 import { ProviderDatabase } from "./db/database.js";
 import { createPlcDirectoryClient } from "./plc/client.js";
 import { OnboardingRepository } from "./onboarding/repository.js";
-import { PlcHailDidResolver } from "./plc/resolver.js";
+import { createHailDidResolver } from "./plc/public-resolver.js";
 import { GrantRepository } from "./grants/repository.js";
 import { GrantReceiver } from "./grants/receiver.js";
 import { GrantPublisher } from "./grants/publisher.js";
@@ -36,6 +36,7 @@ import { GrantService } from "./grants/service.js";
 import { AddressVerifier } from "./discovery/verifier.js";
 import { SenderProfileVerifier } from "./profiles/verifier.js";
 import { PrivatePocOnboarding } from "./onboarding/private-poc.js";
+import { PublicOnboarding } from "./onboarding/public.js";
 import { ActivationService } from "./onboarding/activation.js";
 import { AccountMessaging } from "./accounts/messaging.js";
 import { EnvelopeService } from "./envelopes/service.js";
@@ -56,7 +57,7 @@ const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
 const plc = createPlcDirectoryClient(config.plcDirectoryUrl);
 const onboardingRepository = new OnboardingRepository(database.sql);
-const resolver = new PlcHailDidResolver(plc);
+const resolver = createHailDidResolver(config,database.sql);
 const grantRepository = new GrantRepository(database.sql);
 const transport = new SafeHttpsTransport();
 const grantPublisher = new GrantPublisher(
@@ -163,13 +164,16 @@ const checkReadiness = async () => {
   return { ready: true };
 };
 let transferCompletion:PrivatePocTransferCompletion|undefined;
+if(process.env.PUBLIC_SELF_SERVICE_ONBOARDING==="true"&&process.env.POC_SELF_SERVICE_ONBOARDING==="true") {
+  throw new Error("Public and private-POC self-service onboarding cannot be enabled together");
+}
 if(!schemaRehearsal&&process.env.POC_SELF_SERVICE_TRANSFER==="true") {
   const encryptor=new KeyEncryptor(config.keyEncryptionKey),gate=new PrivatePocCutoverGate(database.sql,
     {origin:config.plcDirectoryUrl,resolver,audit:did=>plc.getAuditableLog(did)},config.plcDirectoryUrl,config.hailServiceBase);
   transferCompletion=new PrivatePocTransferCompletion(database.sql,new MigrationTransferService(database.sql,onboardingRepository,encryptor,resolver,config.hailServiceBase,process.env.POC_SELF_SERVICE_RETURN==="true"),
     new PrivatePocPlcSubmission(database.sql,plc,config.plcDirectoryUrl,config.hailServiceBase),
     new PrivatePocAddressPublication(database.sql,resolver,gate,config.plcDirectoryUrl,config.hailServiceBase),
-    new PortableMigrationActivation(database.sql,encryptor,resolver,gate,new AddressVerifier(plc,transport.fetch,transport.validateTarget),
+    new PortableMigrationActivation(database.sql,encryptor,resolver,gate,new AddressVerifier(plc,transport.fetch,transport.validateTarget,undefined,resolver),
       config.hailServiceBase,config.plcDirectoryUrl,undefined,"private-poc",process.env.POC_SELF_SERVICE_RETURN==="true"),config.hailServiceBase);
 }
 const app = createApp(config, schemaRehearsal ? {
@@ -180,9 +184,14 @@ const app = createApp(config, schemaRehearsal ? {
   servingSql:database.sql,
   ...(process.env.POC_ACCOUNT_ACCESS === "true" ?
     { accountAccess: { access: new AccountAccess(database.sql, resolver, config.publicOrigin), sql: database.sql } } : {}),
-  ...(process.env.POC_SELF_SERVICE_ONBOARDING === "true" ? {selfServiceOnboarding:{sql:database.sql,
+  ...(process.env.PUBLIC_SELF_SERVICE_ONBOARDING === "true" ? (()=>{
+    if(config.nodeEnv!=="production"||!config.publicPlcAuthority)throw new Error("Public self-service onboarding requires production strict public PLC authority");
+    return {selfServiceOnboarding:{sql:database.sql,profile:"strict-public-v1" as const,
+      onboarding:new PublicOnboarding(database.sql,plc,resolver,new KeyEncryptor(config.keyEncryptionKey),config.plcDirectoryUrl,
+        config.hailServiceBase,new AddressVerifier(plc,transport.fetch,transport.validateTarget,undefined,resolver)),provider:config.publicOrigin}};
+  })() : process.env.POC_SELF_SERVICE_ONBOARDING === "true" ? {selfServiceOnboarding:{sql:database.sql,
     onboarding:new PrivatePocOnboarding(database.sql,plc,new KeyEncryptor(config.keyEncryptionKey),config.plcDirectoryUrl,config.hailServiceBase),
-    activation:new ActivationService(onboardingRepository,new AddressVerifier(plc,transport.fetch,transport.validateTarget),config.hailServiceBase,"public"),provider:config.publicOrigin}} : {}),
+    activation:new ActivationService(onboardingRepository,new AddressVerifier(plc,transport.fetch,transport.validateTarget,undefined,resolver),config.hailServiceBase,"public"),provider:config.publicOrigin,profile:"private-poc" as const}} : {}),
   accountApi: { accounts: new AccountApiRepository(database.sql), grants: grantRepository,
     ...(process.env.POC_SELF_SERVICE_TRANSFER==="true"?{transfer:new AccountTransfer(database.sql,
       new TransferGrantSubmission(database.sql,resolver,config.hailServiceBase,onboardingRepository,new KeyEncryptor(config.keyEncryptionKey),
@@ -191,13 +200,13 @@ const app = createApp(config, schemaRehearsal ? {
       {fence:new MigrationFenceService(database.sql,resolver,config.hailServiceBase),snapshots:new MigrationTransferService(database.sql,onboardingRepository,
         new KeyEncryptor(config.keyEncryptionKey),resolver,config.hailServiceBase)})}:{}),
     binding:new AccountBinding(database.sql,resolver,new KeyEncryptor(config.keyEncryptionKey),config.publicOrigin,
-      new AddressVerifier(plc,transport.fetch,transport.validateTarget)),
+       new AddressVerifier(plc,transport.fetch,transport.validateTarget,undefined,resolver)),
     messaging:new AccountMessaging(database.sql,new BodyRepository(database.sql),new EnvelopeRepository(database.sql),
       new EnvelopeService(onboardingRepository,grantRepository,new EnvelopeRepository(database.sql),new KeyEncryptor(config.keyEncryptionKey),resolver,config.hailServiceBase),
       (sender,id)=>submitEnvelope(sender,id,new EnvelopeRepository(database.sql),resolver,
         new DeliveryStatusReceiver(database.sql,onboardingRepository,resolver,config.hailServiceBase),transport)),
     service: new GrantService(onboardingRepository, grantRepository, new KeyEncryptor(config.keyEncryptionKey),
-      resolver, new AddressVerifier(plc, transport.fetch, transport.validateTarget),
+       resolver, new AddressVerifier(plc, transport.fetch, transport.validateTarget,undefined,resolver),
       new SenderProfileVerifier(resolver, transport.fetch, transport.validateTarget, undefined, onboardingRepository),
       config.hailServiceBase) },
   discoveryStore: onboardingRepository,

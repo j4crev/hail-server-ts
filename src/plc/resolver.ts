@@ -19,6 +19,7 @@ export interface PlcResolutionEvidence {
   document: object;
   data: object;
   log: readonly object[];
+  verification?: { profile: "strict-public-v1"; digest: string; operationCid: string; verifiedAt: string };
 }
 
 export interface HailDidResolver {

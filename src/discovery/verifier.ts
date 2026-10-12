@@ -9,7 +9,7 @@ import { canonicalizeHailAddress } from "../identity/address.js";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { PlcDirectoryClient } from "../plc/client.js";
 import { PlcHailDidResolver } from "../plc/resolver.js";
-import type { PlcResolutionEvidence } from "../plc/resolver.js";
+import type { HailDidResolver, PlcResolutionEvidence } from "../plc/resolver.js";
 import { ADDRESS_BINDING_REL, COSE_SIGN1_MEDIA_TYPE } from "./routes.js";
 import { parseJsonWithoutDuplicateKeys } from "./strict-json.js";
 
@@ -114,6 +114,7 @@ export class AddressVerifier {
     private readonly fetchRequest: DiscoveryFetch,
     private readonly validateTarget: NetworkTargetValidator,
     private readonly now: () => Date = () => new Date(),
+    private readonly resolver: HailDidResolver = new PlcHailDidResolver(plc),
   ) {}
 
   async verify(addressInput: string): Promise<VerifiedAddress> {
@@ -224,7 +225,7 @@ export class AddressVerifier {
       representation,
       createWebCryptoVerifier(async (keyId) => {
         const did = keyId.slice(0, keyId.indexOf("#"));
-        const resolved = await new PlcHailDidResolver(this.plc).resolve(did);
+        const resolved = await this.resolver.resolve(did);
         if (keyId !== `${did}#hail-identity`) {
           throw new Error("Unexpected Address Binding key ID");
         }

@@ -2,8 +2,7 @@ import { loadConfig } from "../config.js";
 import { ProviderDatabase } from "../db/database.js";
 import { SafeHttpsTransport } from "../discovery/safe-fetch.js";
 import { TransferInvitationDelivery } from "../migration/invitation-delivery.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 import { writeTransferRecord } from "./transfer-record.js";
 
 const [did, offerFile] = Bun.argv.slice(2);
@@ -16,7 +15,7 @@ try {
   await database.migrate();
   const transport = new SafeHttpsTransport();
   const signedOffer = await new TransferInvitationDelivery(database.sql,
-    new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl)),
+    createHailDidResolver(config,database.sql),
     config.hailServiceBase, transport.fetch, transport.validateTarget).deliver(did);
   await writeTransferRecord(offerFile, signedOffer);
 } finally { await database.close(); }

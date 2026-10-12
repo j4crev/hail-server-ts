@@ -7,6 +7,7 @@ import { importEd25519PrivateKey } from "../identity/keys.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
 import type { HailDidResolver } from "../plc/resolver.js";
+import { retainPublicSigningAuthority } from "../plc/signing-authority.js";
 import type { AddressVerificationService } from "../onboarding/activation.js";
 import type { AccountApiSession } from "./repository.js";
 
@@ -40,7 +41,10 @@ export class AccountBinding {
     const keys=await tx<{role:string;public_key:string}[]>`SELECT role,public_key FROM account_keys WHERE account_id=${session.account_id}`;
     if(current.did!==session.did||current.serviceBase!==`${this.origin}/hail`||current.identityDidKey!==key||
       !keys.some(k=>k.role==="hail-messaging"&&k.public_key===current.messagingDidKey))throw new BindingError(409,"Current signing/service authority differs");
-    return (await tx`SELECT account_id FROM managed_custody_evidence WHERE account_id=${session.account_id}`).length===1;
+    return {
+      managed: (await tx`SELECT account_id FROM managed_custody_evidence WHERE account_id=${session.account_id}`).length === 1,
+      resolved: current,
+    };
   }
   async renew(session:AccountApiSession,input:Record<string,unknown>) {
     if(Object.keys(input).length!==3||typeof input.previous!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(input.previous)||
@@ -49,7 +53,7 @@ export class AccountBinding {
     const previous=decodeBase64Url(input.previous),signingKey=input.signingKey;
     if(encodeBase64Url(previous)!==input.previous)throw new BindingError(400,"Invalid predecessor digest");
     const staged=await this.sql.begin(async tx=>{
-      const managed=await this.writer(tx,session,signingKey);
+      const { managed }=await this.writer(tx,session,signingKey);
       let cose:Uint8Array;
       if(managed) {
         if(!input.payload||input.cose)throw new BindingError(400,"Managed renewal requires an explicit payload");
@@ -79,7 +83,7 @@ export class AccountBinding {
     });
     // Commit hosting first: the immutable final URL is available before WebFinger selects it.
     const result=await this.sql.begin(async tx=>{
-      await this.writer(tx,session,signingKey);
+      const { resolved }=await this.writer(tx,session,signingKey);
       const candidate=(await tx<Row[]>`SELECT id,cose,representation_digest,selected_at,published_at FROM address_bindings WHERE id=${staged.id}`)[0]!;
       const proposed=inspectSignedPayload("hail.address-binding",new Uint8Array(candidate.cose)).payload;this.review(session,proposed);
       if(candidate.published_at)return this.summary(candidate);
@@ -93,7 +97,18 @@ export class AccountBinding {
         AND canonical_address=${session.canonical_address} AND selected_at IS NOT NULL`;
       const row=(await tx<Row[]>`UPDATE address_bindings SET selected_at=clock_timestamp(),published_at=clock_timestamp()
         WHERE id=${candidate.id} AND expires_at>clock_timestamp() RETURNING id,cose,representation_digest,selected_at,published_at`)[0];
-      if(!row)throw new BindingError(409,"Binding expired before publication");return this.summary(row);
+      if(!row)throw new BindingError(409,"Binding expired before publication");
+      await retainPublicSigningAuthority(tx, {
+        actionType: "address-binding",
+        localAccountId: session.account_id,
+        did: session.did,
+        role: "hail-identity",
+        key: signingKey,
+        serviceBase: `${this.origin}/hail`,
+        representation: new Uint8Array(candidate.cose),
+        evidence: resolved.evidence,
+      });
+      return this.summary(row);
     });
     if(result.status==="active") {
       const verified=await this.verifier.verify(session.canonical_address);

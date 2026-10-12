@@ -6,15 +6,14 @@ import { TerminalStatusPublisher } from "../delivery/status-publisher.js";
 import { SafeHttpsTransport } from "../discovery/safe-fetch.js";
 import { KeyEncryptor } from "../identity/key-encryption.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
 try {
   await database.migrate();
   const transport = new SafeHttpsTransport();
-  const resolver = new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl));
+  const resolver = createHailDidResolver(config,database.sql);
   const signer = new DeliveryStatusSigner(database.sql, new OnboardingRepository(database.sql),
     new KeyEncryptor(config.keyEncryptionKey), resolver, config.hailServiceBase);
   const result = await withFreshServingGenerations(database.sql,()=>new TerminalStatusPublisher(database.sql, signer, resolver,

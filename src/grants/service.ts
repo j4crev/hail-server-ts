@@ -22,6 +22,7 @@ import type { SenderProfileVerifier } from "../profiles/verifier.js";
 import type { GrantStore, SignedGrantRevision, SignedGrantRevisionInput } from "./store.js";
 import { inspectSignedPayload } from "@hailproto/codec";
 import { expandsAuthorization, restrictsAuthorization } from "./revision.js";
+import { assertPublicAuthorityFresh } from "../plc/authority.js";
 
 export interface GrantAccountRepository {
   getAccountByAddress(address: string): Promise<AccountRecord>;
@@ -184,7 +185,7 @@ export class GrantService {
     const now = Math.floor(this.now().getTime() / 1000);
     const signed: SignedGrantRevisionInput = { localAccountId: grantor.id, localRole: "grantor",
       payload, representation, digest: new Uint8Array(createHash("sha256").update(representation).digest()),
-      signingPublicKey: resolved.identityDidKey, signingPlcEvidence: resolved.evidence };
+      signingPublicKey: resolved.identityDidKey, signingPlcEvidence: resolved.evidence,expectedServiceBase:this.expectedServiceBase };
     if (payload.issued_at > now + 300 || payload.updated_at > now + 300) {
       throw new UserGrantError(400, "User-signed Grant timestamp is too far ahead");
     }
@@ -407,6 +408,7 @@ export class GrantService {
     signingPlcEvidence: PlcResolutionEvidence,
   ): Promise<SignedGrantRevisionInput> {
     if (!account.did || key.algorithm !== "ed25519") throw new Error("Invalid identity signing key");
+    assertPublicAuthorityFresh(signingPlcEvidence,this.now());
     const privateBytes = await this.encryptor.decrypt(
       account.id,
       key.role,
@@ -441,6 +443,7 @@ export class GrantService {
       digest: new Uint8Array(createHash("sha256").update(representation).digest()),
       signingPublicKey: key.publicKey,
       signingPlcEvidence,
+      expectedServiceBase:this.expectedServiceBase,
     };
   }
 }

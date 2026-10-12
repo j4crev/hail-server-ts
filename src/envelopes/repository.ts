@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { encodePayload, inspectSignedPayload, type HailEnvelope } from "@hailproto/codec";
 import type { SQL } from "bun";
 import type { PlcResolutionEvidence } from "../plc/resolver.js";
+import { retainPublicEnvelopeAuthority } from "../plc/envelope-authority.js";
 
 export interface PublishedBodyInfo { size: number; senderAccountId: string; }
 export interface EnvelopeDecision {
@@ -12,6 +13,8 @@ export interface EnvelopeDecision {
   localAccountId: string;
   signingPublicKey: string;
   evidence: PlcResolutionEvidence;
+  recipientEvidence?: PlcResolutionEvidence;
+  recipientServiceBase?: string;
   now: number;
 }
 
@@ -218,6 +221,7 @@ export class EnvelopeRepository {
         RETURNING payload_digest
       `;
     if (inserted.length && outcome === "accepted") {
+      await retainPublicEnvelopeAuthority(tx,input,now);
       await tx`
         INSERT INTO delivery_work (sender_did, message_id, state)
         VALUES (${payload.from}, ${payload.message_id}, 'accepted')

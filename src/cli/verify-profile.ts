@@ -1,8 +1,7 @@
 import { loadConfig } from "../config.js";
 import { ProviderDatabase } from "../db/database.js";
 import { SafeHttpsTransport } from "../discovery/safe-fetch.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
 import { SenderProfileVerifier } from "../profiles/verifier.js";
 
@@ -16,7 +15,7 @@ try {
   const transport = new SafeHttpsTransport();
   const repository = new OnboardingRepository(database.sql);
   const verified = await new SenderProfileVerifier(
-    new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl)),
+    createHailDidResolver(config,database.sql),
     transport.fetch,
     transport.validateTarget,
     undefined,

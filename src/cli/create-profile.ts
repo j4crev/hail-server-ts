@@ -4,8 +4,7 @@ import { ProviderDatabase } from "../db/database.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { KeyEncryptor } from "../identity/key-encryption.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 import {
   SenderProfileService,
   type SenderProfileDefinition,
@@ -79,7 +78,7 @@ try {
   const profile = await new SenderProfileService(
     repository,
     new KeyEncryptor(config.keyEncryptionKey),
-    new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl)),
+    createHailDidResolver(config,database.sql),
     config.hailServiceBase,
   ).createOrReuse(address, definition);
   console.info(

@@ -27,6 +27,8 @@ import { OnboardingRepository } from "../src/onboarding/repository.js";
 import { PortableCutoverGate, type IndependentPlcObserver } from "../src/migration/cutover-gate.js";
 import { PrivatePocCutoverGate } from "../src/migration/poc-cutover-gate.js";
 import { signMonitorAttestation } from "../src/migration/monitor-attestation.js";
+import { plcStateDigest } from "../src/plc/read-evidence.js";
+import { evidenceHash, PUBLIC_EVIDENCE_LIMITS } from "../src/migration/public-cutover-evidence.js";
 import { PreparedMigrationTarget } from "../src/migration/target-keys.js";
 import { PortableMigrationActivation } from "../src/migration/activation.js";
 import { handshakeDigest, signHandshake, TransferInvitationService, type SignedHandshake,
@@ -175,7 +177,7 @@ integration("fenced transfer and concurrent cutover", () => {
     await source.sql`
       INSERT INTO plc_operation_evidence (id, account_id, did, operation_cid, registry_origin,
         signed_operation, signed_operation_bytes, dag_cbor, expected_state, submission_state)
-      VALUES (${randomUUID()}, ${id}, ${did}, ${operationCid}, 'http://plc.fixture:2582',
+      VALUES (${randomUUID()}, ${id}, ${did}, ${operationCid}, 'https://plc.directory',
         ${JSON.stringify(operation)}::jsonb, ${new TextEncoder().encode(JSON.stringify(operation))},
         ${new Uint8Array(dagCbor.encode(operation))}, ${JSON.stringify(expectedState)}::jsonb, 'verified')
     `;
@@ -784,8 +786,10 @@ integration("fenced transfer and concurrent cutover", () => {
       SELECT manifest_bytes FROM pending_migration_imports WHERE transfer_id = ${fence.transferId}`;
     const original = new Uint8Array(rows[0]!.manifest_bytes);
     const manifest = JSON.parse(new TextDecoder().decode(original)) as {
-      tables: { portable_custody_evidence: { monitor_verification_mode: string }[] } };
+      tables: { portable_custody_evidence: { monitor_verification_mode: string }[];
+        plc_operation_evidence: { registry_origin: string }[] } };
     manifest.tables.portable_custody_evidence[0]!.monitor_verification_mode = "poc-local";
+    for (const entry of manifest.tables.plc_operation_evidence) entry.registry_origin = "http://plc.fixture:2582";
     const pocManifest = new TextEncoder().encode(JSON.stringify(manifest));
     const updated = signedCutoverOperation;
     const result = await validateOperationLog(did, [genesisOperation, updated]);
@@ -805,6 +809,7 @@ integration("fenced transfer and concurrent cutover", () => {
       const pocGate = new PrivatePocCutoverGate(target.sql, observer,
         "http://plc.fixture:2582", targetBase);
       expect((await pocGate.assess(fence.transferId)).eligible).toBe(true);
+      expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`).toHaveLength(0);
       const assessment = await target.sql<{ assessment_profile: string; mirror_origins: string | string[] }[]>`
         SELECT assessment_profile, mirror_origins FROM portable_cutover_observations
         WHERE transfer_id = ${fence.transferId}`;
@@ -833,40 +838,141 @@ integration("fenced transfer and concurrent cutover", () => {
       messagingDidKey: destinationMessagingPublicKey, serviceBase: targetBase,
       evidence: { document: {}, data: nextState!, log: [genesisOperation, updated] } };
     const observer = (origin: string): IndependentPlcObserver => ({
-      origin,
+      origin, operator: new URL(origin).hostname,
       resolver: { async resolve() { return observed; } },
-      async audit() { return [{ did, operation: updated, cid: operationCid,
-        nullified: false, createdAt: new Date().toISOString() }]; },
+      async audit() { return [
+        { did, operation: genesisOperation, cid: (await cidForCbor(genesisOperation)).toString(),
+          nullified: false, createdAt: new Date(cutoverClock - 3600_000).toISOString() },
+        { did, operation: updated, cid: operationCid, nullified: false, createdAt: new Date(cutoverClock).toISOString() },
+      ]; },
     });
     const witnesses: [IndependentPlcObserver, IndependentPlcObserver] = [
       observer("https://mirror-one.example.com"), observer("https://mirror-two.example.com"),
     ];
     cutoverClock = Date.now();
-    targetGate = new PortableCutoverGate(target.sql, witnesses, () => new Date(cutoverClock));
+    const providerOperators = ["source-operator", "target-operator"];
+    targetGate = new PortableCutoverGate(target.sql, witnesses, () => new Date(cutoverClock), providerOperators);
     const first = Math.floor(cutoverClock / 1000);
     const report = async () => signMonitorAttestation({
-      type: "hail.plc-monitor-attestation", version: 1, did,
+      type: "hail.plc-monitor-attestation", version: 2, did,
       transfer_id: fence.transferId, operation_cid: operationCid,
       monitor_origin: "https://monitor.example.com", coverage_since: first - 3600,
       observed_at: Math.floor(cutoverClock / 1000),
+      bootstrap_cid: (await cidForCbor(genesisOperation)).toString(),
+      bootstrap_state_digest: plcStateDigest((await validateOperationLog(did, [genesisOperation]))!),
+      export_sequence: 2,
     }, monitorPrivateKey);
-    const initial = await targetGate.assess(fence.transferId, await report());
+    const exactReport = await report();
+    const initial = await targetGate.assess(fence.transferId, exactReport);
     expect(initial.eligible).toBe(true);
     expect(initial.earliestEligibleAt.getTime()).toBe(initial.firstSeenAt.getTime());
+    expect(initial.evidenceDigest).toHaveLength(32);
+    const initialRows = await target.sql<{ bundle_bytes: Uint8Array; evidence_digest: Uint8Array }[]>`
+      SELECT bundle_bytes,evidence_digest FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`;
+    expect(initialRows).toHaveLength(1);
+    const bytes = initialRows[0]!.bundle_bytes;
+    expect(evidenceHash(bytes)).toEqual(new Uint8Array(initialRows[0]!.evidence_digest));
+    const bundle = decodeDeterministic(bytes, PUBLIC_EVIDENCE_LIMITS) as Record<string, any>;
+    expect(bundle).toMatchObject({ type:"hail.public-cutover-evidence",version:1,did,transfer_id:fence.transferId,
+      operation_cid:operationCid,provider_operators:providerOperators });
+    expect(bundle.monitor.payload).toEqual(exactReport.payloadBytes); expect(bundle.monitor.signature).toEqual(exactReport.signature);
+    expect(bundle.monitor.public_key).toBe(monitorPublicKey);
+    expect(bundle.bootstrap.state_digest).toBe(plcStateDigest(bundle.bootstrap.state));
+    expect(bundle.witnesses.map((entry: any)=>entry.origin)).toEqual(witnesses.map(entry=>entry.origin));
+    expect(bundle.witnesses[0].log).toEqual([genesisOperation,updated]);
+    expect(bundle.witnesses[0].signed_operations[0].dag_cbor).toEqual(new Uint8Array(dagCbor.encode(genesisOperation)));
+    const restartedGate = new PortableCutoverGate(target.sql,witnesses,()=>new Date(cutoverClock),providerOperators);
+    const retried = await Promise.all([restartedGate.assess(fence.transferId,exactReport),targetGate.assess(fence.transferId,exactReport)]);
+    expect(retried.map(result=>result.evidenceDigest)).toEqual([initial.evidenceDigest,initial.evidenceDigest]);
+    expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`).toHaveLength(1);
+    await expect(target.sql`UPDATE public_cutover_evidence SET bundle_bytes=${bytes} WHERE transfer_id=${fence.transferId}`).rejects.toThrow("immutable");
+    await expect(target.sql`DELETE FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`).rejects.toThrow("immutable");
+    await expect(target.sql`TRUNCATE public_cutover_evidence`).rejects.toThrow();
+    // A migration-39-style writer may still read the unchanged observation row,
+    // but it cannot materialize a public account without the retained selection.
+    await target.sql`DELETE FROM public_cutover_evidence_selection WHERE transfer_id=${fence.transferId}`;
+    try {
+      await expect(target.sql`UPDATE pending_migration_imports SET state='active',activated_at=${new Date(cutoverClock)}
+        WHERE transfer_id=${fence.transferId}`).rejects.toThrow("retained evidence bundle");
+      expect((await target.sql<{state:string}[]>`SELECT state FROM pending_migration_imports WHERE transfer_id=${fence.transferId}`)[0]!.state).toBe("staged");
+    }finally{await target.sql`INSERT INTO public_cutover_evidence_selection(transfer_id,evidence_digest) VALUES(${fence.transferId},${initial.evidenceDigest!})`;}
+    await target.sql`UPDATE portable_cutover_observations SET state='quarantined' WHERE transfer_id=${fence.transferId}`;
+    try {await expect(target.sql`UPDATE pending_migration_imports SET state='active',activated_at=${new Date(cutoverClock)}
+      WHERE transfer_id=${fence.transferId}`).rejects.toThrow("retained evidence bundle");}
+    finally{await target.sql`UPDATE portable_cutover_observations SET state='eligible' WHERE transfer_id=${fence.transferId}`;}
+    const rollbackConnection=await target.sql.reserve();
+    try {
+      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql",import.meta.url)).text());
+      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0043_public_signing_authority.sql",import.meta.url)).text());
+      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0042_public_grant_authority.sql",import.meta.url)).text());
+      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0041_public_plc_authority.sql",import.meta.url)).text());
+      await expect(rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0040_public_cutover_evidence.sql",import.meta.url)).text())).rejects.toThrow("prevent rollback");
+    }
+    finally{await rollbackConnection.unsafe("ROLLBACK");rollbackConnection.release();}
+    await target.migrate();
+    try {
+      await target.sql`UPDATE portable_cutover_observations SET assessment_profile='private-poc' WHERE transfer_id=${fence.transferId}`;
+      await expect(targetGate.assess(fence.transferId, await report())).rejects.toThrow("public PLC trust profile");
+    } finally { await target.sql`UPDATE portable_cutover_observations SET assessment_profile='public' WHERE transfer_id=${fence.transferId}`; }
+    const originalManifest = (await target.sql<{ manifest_bytes: Uint8Array }[]>`SELECT manifest_bytes FROM pending_migration_imports WHERE transfer_id=${fence.transferId}`)[0]!.manifest_bytes;
+    const privateManifest = JSON.parse(new TextDecoder().decode(originalManifest));
+    privateManifest.tables.plc_operation_evidence[0].registry_origin = "http://plc.fixture:2582";
+    try {
+      await target.sql`UPDATE pending_migration_imports SET manifest_bytes=${new TextEncoder().encode(JSON.stringify(privateManifest))} WHERE transfer_id=${fence.transferId}`;
+      await expect(targetGate.assess(fence.transferId, await report())).rejects.toThrow("public PLC registration evidence");
+    } finally { await target.sql`UPDATE pending_migration_imports SET manifest_bytes=${originalManifest} WHERE transfer_id=${fence.transferId}`; }
     // Independent observations permit immediate activation. A delayed operator
     // still has to fail previously accepted work whose original deadline expired.
     cutoverClock += 2 * 3600 * 1000;
     expect((await targetGate.assess(fence.transferId, await report())).eligible).toBe(true);
+    expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`).toHaveLength(2);
+    expect((await target.sql<{bundle_bytes:Uint8Array}[]>`SELECT bundle_bytes FROM public_cutover_evidence
+      WHERE transfer_id=${fence.transferId} AND evidence_digest=${initial.evidenceDigest!}`)[0]!.bundle_bytes).toEqual(bytes);
     const targetAccount = await target.sql`SELECT id FROM provider_accounts WHERE did = ${did}`;
     expect(targetAccount).toHaveLength(0); // Assessment never activates an import.
     const disagreement = new PortableCutoverGate(target.sql, [witnesses[0], {
       ...witnesses[1], async audit() { return [{ did, operation: updated, cid: "bafyunexpected",
         nullified: false, createdAt: new Date().toISOString() }]; },
-    }], () => new Date(cutoverClock));
+    }], () => new Date(cutoverClock), providerOperators);
     await expect(disagreement.assess(fence.transferId, await report())).rejects.toThrow("Mirror audit");
+    const differingAudit = new PortableCutoverGate(target.sql, [witnesses[0], { ...witnesses[1], async audit(value) {
+      const entries = await witnesses[1].audit(value);
+      return entries.map(entry => ({ ...entry, createdAt: new Date(Date.parse(entry.createdAt) + 1).toISOString() }));
+    } }], () => new Date(cutoverClock), providerOperators);
+    await expect(differingAudit.assess(fence.transferId, await report())).rejects.toThrow("witnesses disagree");
+    for (const unsafe of [
+      { ...witnesses[1], operator: witnesses[0].operator! },
+      { ...witnesses[1], operator: "source-operator" },
+      { ...witnesses[1], origin: "https://source.example.com" },
+      { ...witnesses[1], origin: "https://mirror-one.example.com:8443" },
+      { ...witnesses[1], origin: "https://mirror-two.example.com/" },
+      { ...witnesses[1], origin: "https://mirror..example.com" },
+    ]) {
+      await expect(new PortableCutoverGate(target.sql, [witnesses[0], unsafe], () => new Date(cutoverClock), providerOperators)
+        .assess(fence.transferId, await report())).rejects.toThrow("independently configured");
+    }
+    const unavailable = new PortableCutoverGate(target.sql, [witnesses[0], { ...witnesses[1], async audit() { throw new Error("Reader unavailable"); } }],
+      () => new Date(cutoverClock), providerOperators);
+    await expect(unavailable.assess(fence.transferId, await report())).rejects.toThrow("Reader unavailable");
+    const pausedImport = new PortableCutoverGate(target.sql,[witnesses[0],{...witnesses[1],async audit(value){
+      await target.sql`UPDATE pending_migration_imports SET manifest_bytes=${new Uint8Array([...originalManifest,10])} WHERE transfer_id=${fence.transferId}`;
+      return witnesses[1].audit(value);
+    }}],()=>new Date(cutoverClock),providerOperators);
+    try {await expect(pausedImport.assess(fence.transferId,await report())).rejects.toThrow("import changed");}
+    finally{await target.sql`UPDATE pending_migration_imports SET manifest_bytes=${originalManifest} WHERE transfer_id=${fence.transferId}`;}
+    const legacy = await signMonitorAttestation({ type: "hail.plc-monitor-attestation", version: 1, did,
+      transfer_id: fence.transferId, operation_cid: operationCid, monitor_origin: "https://monitor.example.com",
+      coverage_since: first - 3600, observed_at: Math.floor(cutoverClock / 1000) }, monitorPrivateKey);
+    await expect(targetGate.assess(fence.transferId, legacy)).rejects.toThrow("bootstrap v2");
+    const wrongBootstrap = await signMonitorAttestation({ type: "hail.plc-monitor-attestation", version: 2, did,
+      transfer_id: fence.transferId, operation_cid: operationCid, monitor_origin: "https://monitor.example.com",
+      coverage_since: first - 3600, observed_at: Math.floor(cutoverClock / 1000), export_sequence: 2,
+      bootstrap_cid: (await cidForCbor(genesisOperation)).toString(), bootstrap_state_digest: encodeBase64Url(new Uint8Array(32)) }, monitorPrivateKey);
+    await expect(targetGate.assess(fence.transferId, wrongBootstrap)).rejects.toThrow("bootstrap checkpoint");
     const badMonitor = await report();
     badMonitor.signature[0] = badMonitor.signature[0]! ^ 1;
     await expect(targetGate.assess(fence.transferId, badMonitor)).rejects.toThrow("signature is invalid");
+    expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`).toHaveLength(2);
   });
 
   it("preserves a sender's existing copy of the same Grant when providers become collocated", async () => {
@@ -906,21 +1012,32 @@ integration("fenced transfer and concurrent cutover", () => {
       verifiedAt: new Date(cutoverClock), binding: signedBinding,
       representation: destinationBinding, digest: bindingDigest };
     let matchAddress = false;
-    const addressVerifier = { async verify() { return matchAddress ? verified : {
-      ...verified, digest: randomBytes(32),
-    }; } };
+    let replayOldEvidence=false;
+    const addressVerifier = { async verify() {
+      if(replayOldEvidence){const old=(await target.sql<{evidence_digest:Uint8Array}[]>`SELECT evidence_digest FROM public_cutover_evidence
+        WHERE transfer_id=${fence.transferId} ORDER BY verified_at,evidence_digest LIMIT 1`)[0]!;
+        await target.sql`UPDATE public_cutover_evidence_selection SET evidence_digest=${old.evidence_digest} WHERE transfer_id=${fence.transferId}`;}
+      return matchAddress ? verified : { ...verified, digest: randomBytes(32) };
+    } };
     const activation = new PortableMigrationActivation(target.sql, targetEncryption, destinationResolver,
       targetGate, addressVerifier, targetBase, "https://plc.directory", () => new Date(cutoverClock));
     const report = async () => signMonitorAttestation({
-      type: "hail.plc-monitor-attestation", version: 1, did, transfer_id: fence.transferId,
+      type: "hail.plc-monitor-attestation", version: 2, did, transfer_id: fence.transferId,
       operation_cid: (await cidForCbor(signedCutoverOperation)).toString(),
       monitor_origin: "https://monitor.example.com",
       coverage_since: Math.floor(cutoverClock / 1000) - 73 * 3600,
       observed_at: Math.floor(cutoverClock / 1000),
+      bootstrap_cid: (await cidForCbor(genesisOperation)).toString(),
+      bootstrap_state_digest: plcStateDigest((await validateOperationLog(did, [genesisOperation]))!),
+      export_sequence: 2,
     }, monitorPrivateKey);
     await expect(activation.activate(fence.transferId, await report())).rejects.toThrow("address does not select");
     expect(await target.sql`SELECT id FROM provider_accounts WHERE did = ${did}`).toHaveLength(0);
     matchAddress = true;
+    replayOldEvidence=true;
+    try {await expect(activation.activate(fence.transferId,await report())).rejects.toThrow("public cutover evidence");}
+    finally{replayOldEvidence=false;}
+    expect(await target.sql`SELECT id FROM provider_accounts WHERE did=${did}`).toHaveLength(0);
     const occupiedId = id;
     await target.sql`INSERT INTO provider_accounts (id, tenant_id, canonical_address, onboarding_state)
       VALUES (${occupiedId}, ${randomUUID()}, ${`conflict-${id}@target.example.com`}, 'reserved')`;
@@ -931,6 +1048,18 @@ integration("fenced transfer and concurrent cutover", () => {
     expect(pending[0]?.state).toBe("staged");
     await target.sql`DELETE FROM provider_accounts WHERE id = ${occupiedId}`;
     expect(await activation.activate(fence.transferId, await report())).toEqual({ did, accountId: id });
+    const selection=(await target.sql<{activated_at:Date;evidence_digest:Uint8Array}[]>`
+      SELECT activated_at,evidence_digest FROM public_cutover_evidence_selection WHERE transfer_id=${fence.transferId}`)[0]!;
+    const activationTime=(await target.sql<{activated_at:Date}[]>`SELECT activated_at FROM pending_migration_imports WHERE transfer_id=${fence.transferId}`)[0]!.activated_at;
+    expect(selection.activated_at.getTime()).toBe(activationTime.getTime());
+    const sealedBundle=(await target.sql<{bundle_bytes:Uint8Array}[]>`SELECT bundle_bytes FROM public_cutover_evidence
+      WHERE transfer_id=${fence.transferId} AND evidence_digest=${selection.evidence_digest}`)[0]!.bundle_bytes;
+    expect((decodeDeterministic(sealedBundle,PUBLIC_EVIDENCE_LIMITS) as Record<string,any>).verified_at).toBe(new Date(cutoverClock).toISOString());
+    await expect(target.sql`UPDATE public_cutover_evidence_selection SET evidence_digest=${selection.evidence_digest} WHERE transfer_id=${fence.transferId}`).rejects.toThrow("immutable");
+    await expect(target.sql`DELETE FROM public_cutover_evidence_selection WHERE transfer_id=${fence.transferId}`).rejects.toThrow("immutable");
+    const evidenceCount=(await target.sql`SELECT evidence_digest FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`).length;
+    expect(await activation.activate(fence.transferId,await report())).toEqual({did,accountId:id});
+    expect((await target.sql`SELECT evidence_digest FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`).length).toBe(evidenceCount);
     const collocated = await target.sql<{ local_role: string; local_account_id: string }[]>`
       SELECT local_role, local_account_id FROM grant_lineages WHERE grant_id = ${grantId}`;
     expect(collocated[0]).toMatchObject({ local_role: "grantor", local_account_id: id });

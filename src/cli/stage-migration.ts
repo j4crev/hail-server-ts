@@ -6,8 +6,7 @@ import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { KeyEncryptor } from "../identity/key-encryption.js";
 import { MigrationTransferService } from "../migration/transfer.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 
 const [inputFile, consentFile, plcOperationFile, addressBindingFile] = Bun.argv.slice(2);
 if (!inputFile || !consentFile || !plcOperationFile || !addressBindingFile || Bun.argv.length !== 6) {
@@ -50,7 +49,7 @@ try {
   await database.migrate();
   const manifest = await new MigrationTransferService(database.sql, new OnboardingRepository(database.sql),
     new KeyEncryptor(config.keyEncryptionKey),
-    new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl)), config.hailServiceBase)
+    createHailDidResolver(config,database.sql), config.hailServiceBase)
     .stageImport({ bytes: decode(envelope.manifest as string), digest: decode(envelope.digest as string),
       signature: decode(envelope.signature as string), sourceMessagingPublicKey: envelope.sourceMessagingPublicKey as string },
       { payloadBytes: decode(consent.payload), signature: decode(consent.signature) },

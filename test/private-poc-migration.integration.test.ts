@@ -582,9 +582,16 @@ integration("private PLC transfer between disposable POC providers", () => {
       }
       expect(blocked).toBe(true);expect(invalidationDone).toBe(false);finishRemote();expect((await observedSend)?.message).toContain("ambiguous");
       const invalidation=await invalidating;expect(await withFreshServingGenerations(target.sql,()=>targetAbandon.invalidate(intent))).toEqual(invalidation);
+      expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence`).toHaveLength(0);
       const rollbackTarget=await target.sql.reserve();try {
+        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql",import.meta.url)).text());
+        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0043_public_signing_authority.sql",import.meta.url)).text());
+        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0042_public_grant_authority.sql",import.meta.url)).text());
+        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0041_public_plc_authority.sql",import.meta.url)).text());
+        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0040_public_cutover_evidence.sql",import.meta.url)).text());
         await expect(rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0039_transfer_abandonment.sql",import.meta.url)).text())).rejects.toThrow("prevents rollback");
       }finally{await rollbackTarget.unsafe("ROLLBACK");rollbackTarget.release();}
+      await target.migrate();
       await expect(withFreshServingGenerations(target.sql,()=>new PrivatePocPlcSubmission(target.sql,plc,registry,newBase).submit(thirdTransfer!))).rejects.toThrow("inactive staged");
       const manifest=JSON.parse(new TextDecoder().decode(decodeBase64Url(thirdSnapshot.manifest))),baseline=manifest.tables.plc_operation_evidence.at(-1),restore=typeof baseline.expected_state==="string"?JSON.parse(baseline.expected_state):baseline.expected_state;
       const originalProtective=await client.signPlcOperation({type:"plc_operation",prev:baseline.operation_cid,rotationKeys:restore.rotationKeys,verificationMethods:restore.verificationMethods,services:restore.services,alsoKnownAs:restore.alsoKnownAs});

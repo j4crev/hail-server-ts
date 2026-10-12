@@ -4,8 +4,7 @@ import { SafeHttpsTransport } from "../discovery/safe-fetch.js";
 import { KeyEncryptor } from "../identity/key-encryption.js";
 import { TransferFinalRequestPublisher } from "../migration/final-request-publisher.js";
 import { PreparedMigrationTarget } from "../migration/target-keys.js";
-import { createPlcDirectoryClient } from "../plc/client.js";
-import { PlcHailDidResolver } from "../plc/resolver.js";
+import { createHailDidResolver } from "../plc/public-resolver.js";
 
 const transferId = Bun.argv[2];
 if (!transferId || Bun.argv.length !== 3) {
@@ -17,7 +16,7 @@ try {
   await database.migrate();
   const transport = new SafeHttpsTransport();
   await new TransferFinalRequestPublisher(database.sql,
-    new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl)),
+    createHailDidResolver(config,database.sql),
     new PreparedMigrationTarget(database.sql, new KeyEncryptor(config.keyEncryptionKey), config.hailServiceBase),
     transport.fetch, transport.validateTarget).publish(transferId);
   console.info(JSON.stringify({ transferId, acknowledged: true }));

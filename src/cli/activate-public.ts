@@ -13,6 +13,7 @@ if (!address) {
 }
 
 const config = loadConfig();
+if (config.publicPlcAuthority) throw new Error("Strict public activation requires the owner-key/monitor ceremony; prototype activation cannot supply it");
 if (config.nodeEnv !== "production") {
   throw new Error("Public activation requires NODE_ENV=production");
 }
