@@ -97,7 +97,10 @@ it.skipIf(!process.env.DATABASE_URL)("public owner/managed onboarding seals owne
     }
     await expect(db.sql`DELETE FROM public_onboarding_evidence`).rejects.toThrow("immutable");
     const connection = await db.sql.reserve();
-    try { await expect(connection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql", import.meta.url)).text())).rejects.toThrow("prevent rollback"); }
+    try { await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql", import.meta.url)).text());
+      await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql", import.meta.url)).text());
+      await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql", import.meta.url)).text());
+      await expect(connection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql", import.meta.url)).text())).rejects.toThrow("prevent rollback"); }
     finally { await connection.unsafe("ROLLBACK"); connection.release(); }
   } finally {
     await db.close(); await admin.unsafe(`DROP SCHEMA "${schema}" CASCADE`); await admin.close();

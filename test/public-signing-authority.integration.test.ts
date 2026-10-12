@@ -135,6 +135,15 @@ it.skipIf(!process.env.DATABASE_URL)(
       const connection = await db.sql.reserve();
       try {
         await connection.unsafe(
+          await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql", import.meta.url)).text(),
+        );
+        await connection.unsafe(
+          await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql", import.meta.url)).text(),
+        );
+        await connection.unsafe(
+          await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql", import.meta.url)).text(),
+        );
+        await connection.unsafe(
           await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql", import.meta.url)).text(),
         );
         await expect(connection.unsafe(

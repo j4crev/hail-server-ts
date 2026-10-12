@@ -31,6 +31,7 @@ import { registerSelfServiceOnboarding, type SelfServiceOnboarding } from "./acc
 import type { AccountMessaging } from "./accounts/messaging.js";
 import { registerAccountAccess } from "./accounts/access-routes.js";
 import type { AccountAccess } from "./accounts/access.js";
+import type { SameProviderCustodyTransition } from "./accounts/custody-transition.js";
 import type { SQL } from "bun";
 import type { AccountBinding } from "./accounts/binding.js";
 import type { AccountTransfer } from "./accounts/transfer.js";
@@ -59,7 +60,8 @@ export interface AppDependencies {
   transferCancellation?: TransferCancellationService;
   transferCancellationReceiver?: TransferCancellationReceiver;
   transferCompletion?:PrivatePocTransferCompletion;
-  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging; binding?:AccountBinding;transfer?:AccountTransfer };
+  accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging;
+    binding?:AccountBinding;transfer?:AccountTransfer;custodyTransition?:SameProviderCustodyTransition };
   selfServiceOnboarding?: SelfServiceOnboarding;
   accountAccess?: { access: AccountAccess; sql: SQL };
   servingSql?:SQL;
@@ -82,8 +84,8 @@ export function createApp(
   if (dependencies.accountAccess) registerAccountAccess(app, dependencies.accountAccess.access, dependencies.accountAccess.sql);
 
   if (dependencies.accountApi) {
-    const { accounts, grants, service, messaging, binding,transfer } = dependencies.accountApi;
-    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding,transfer);
+    const { accounts, grants, service, messaging, binding,transfer,custodyTransition } = dependencies.accountApi;
+    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding,transfer,custodyTransition);
   }
 
   if (dependencies.discoveryStore) {

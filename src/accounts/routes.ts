@@ -1,4 +1,4 @@
-import { decodeBase64Url, encodeBase64Url, fromDiagnosticJson, HailCodecError, inspectSignedPayload, toDiagnosticJson, type DiagnosticJson } from "@hailproto/codec";
+import { decodeBase64Url, encodeBase64Url, encodeDeterministic, fromDiagnosticJson, HailCodecError, inspectSignedPayload, toDiagnosticJson, type DiagnosticJson } from "@hailproto/codec";
 import type { Context, Hono } from "hono";
 import { isCoseSign1MediaType } from "../http/media-type.js";
 import { GrantConflictError, type GrantRepository } from "../grants/repository.js";
@@ -9,14 +9,15 @@ import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { BindingError, type AccountBinding } from "./binding.js";
 import { AccountTransferError,type AccountTransfer } from "./transfer.js";
 import {withServingGeneration} from "../db/serving.js";
+import type { SameProviderCustodyTransition } from "./custody-transition.js";
 
 const GRANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BYTES = 262_144;
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 
-export async function accountRequestBytes(request: Request): Promise<Uint8Array | null> {
+export async function accountRequestBytes(request: Request,limit=MAX_BYTES): Promise<Uint8Array | null> {
   const declared = request.headers.get("content-length");
-  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > MAX_BYTES)) return null;
+  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > limit)) return null;
   const reader = request.body?.getReader();
   if (!reader) return new Uint8Array();
   const chunks: Uint8Array[] = [];
@@ -26,7 +27,7 @@ export async function accountRequestBytes(request: Request): Promise<Uint8Array 
       const next = await reader.read();
       if (next.done) break;
       length += next.value.length;
-      if (length > MAX_BYTES) { await reader.cancel(); return null; }
+      if (length > limit) { await reader.cancel(); return null; }
       chunks.push(next.value);
     }
   } catch (error) { await reader.cancel().catch(() => {}); throw error; }
@@ -37,7 +38,8 @@ export async function accountRequestBytes(request: Request): Promise<Uint8Array 
 }
 
 export function registerAccountApiRoutes(app: Hono, accounts: AccountApiRepository,
-  grants: GrantRepository, service: GrantService, provider: string, messaging?:AccountMessaging, binding?:AccountBinding,transfer?:AccountTransfer): void {
+  grants: GrantRepository, service: GrantService, provider: string, messaging?:AccountMessaging, binding?:AccountBinding,
+  transfer?:AccountTransfer,custodyTransition?:SameProviderCustodyTransition): void {
   let window = Date.now();
   let requests = 0;
   const handle = async (context: Context, grantId: string | null, action?: string):Promise<Response> => {
@@ -59,6 +61,52 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
       const query = new URL(context.req.url).searchParams;
       if (query.size && action !== "list" && action !== "inbox" && action !== "credential") return problem(400);
       const method = context.req.method;
+      if(action==="custody-review-owner"||action==="custody-prepare-owner"||action==="custody-prepare"||action==="custody-commit") {
+        if(!session.scopes.includes("account:write"))return problem(403);
+        if(!custodyTransition)return problem(503);
+        if(action==="custody-prepare"||action==="custody-review-owner"||action==="custody-prepare-owner") {
+          if(method!=="POST")return problem(405);
+          if(context.req.header("Content-Type")!=="application/json"||context.req.header("Content-Encoding")!==undefined)return problem(415);
+          const limit=action==="custody-prepare-owner"?8*1024*1024:1024;
+          const bytes=await accountRequestBytes(context.req.raw,limit);if(!bytes)return problem(413);
+          let input:unknown;try{input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes));}catch{return problem(400);}
+          if(!input||typeof input!=="object"||Array.isArray(input))return problem(400);
+          if(action==="custody-review-owner") {
+            const value=input as Record<string,unknown>;
+            if(Object.keys(value).length!==1||typeof value.newIdentityKey!=="string")return problem(400);
+            const reviewed=await custodyTransition.reviewOwner(session.account_id,value.newIdentityKey);
+            return context.json({...reviewed,binding:encodeBase64Url(encodeDeterministic(reviewed.binding as never)),
+              activeGrants:reviewed.activeGrants.map(grant=>({grantId:grant.grantId,payload:encodeBase64Url(encodeDeterministic(grant.payload as never)),
+                predecessorDigest:encodeBase64Url(grant.predecessorDigest),destinationServiceBase:grant.destinationServiceBase}))});
+          }
+          if(action==="custody-prepare-owner") {
+            const value=input as Record<string,unknown>,grants=value.grants;
+            if(Object.keys(value).length!==3||typeof value.newIdentityKey!=="string"||typeof value.binding!=="string"||!Array.isArray(grants)||
+              grants.some(grant=>!grant||typeof grant!=="object"||Array.isArray(grant)||Object.keys(grant).length!==2||
+                typeof (grant as Record<string,unknown>).grantId!=="string"||typeof (grant as Record<string,unknown>).cose!=="string"))return problem(400);
+            const prepared=await custodyTransition.prepareOwner(session.account_id,value.newIdentityKey,decodeBase64Url(value.binding),
+              (grants as {grantId:string;cose:string}[]).map(grant=>({grantId:grant.grantId,cose:decodeBase64Url(grant.cose)})));
+            return context.json({...prepared,historyCheckpointDigest:encodeBase64Url(prepared.historyCheckpointDigest),
+              bindingCose:encodeBase64Url(prepared.bindingCose),bindingDigest:encodeBase64Url(prepared.bindingDigest)});
+          }
+          if(Object.keys(input).length)return problem(400);
+          const prepared=await custodyTransition.prepare(session.account_id);
+          return context.json({...prepared,historyCheckpointDigest:encodeBase64Url(prepared.historyCheckpointDigest),
+            bindingCose:encodeBase64Url(prepared.bindingCose),bindingDigest:encodeBase64Url(prepared.bindingDigest)});
+        }
+        if(method!=="POST")return problem(405);
+        if(context.req.header("Content-Type")!=="application/json"||context.req.header("Content-Encoding")!==undefined)return problem(415);
+        const bytes=await accountRequestBytes(context.req.raw);if(!bytes||bytes.length>65536)return problem(413);
+        let input:Record<string,unknown>;try{input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes)) as Record<string,unknown>;}catch{return problem(400);}
+        if(!input||typeof input!=="object"||Array.isArray(input)||Object.keys(input).length!==4||
+          Object.keys(input).some(key=>!["transitionId","operation","approval","signature"].includes(key))||
+          typeof input.transitionId!=="string"||!UUID.test(input.transitionId)||typeof input.operation!=="string"||
+          typeof input.approval!=="string"||typeof input.signature!=="string")return problem(400);
+        try {const operation=decodeBase64Url(input.operation),approval=decodeBase64Url(input.approval),signature=decodeBase64Url(input.signature);
+          if(encodeBase64Url(operation)!==input.operation||encodeBase64Url(approval)!==input.approval||encodeBase64Url(signature)!==input.signature)return problem(400);
+          return context.json(await custodyTransition.commit(input.transitionId,operation,approval,signature));
+        } catch(error) {if(error instanceof SyntaxError||error instanceof HailCodecError)return problem(400);throw error;}
+      }
       if(action==="transfer-status"||action==="transfer-offer"||action==="transfer-cancel"||action==="transfer-export") {
         if(!session.scopes.includes(action==="transfer-status"?"account:read":"account:write"))return problem(403);
         if(!transfer)return problem(503);
@@ -250,6 +298,10 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
   app.all("/api/v1/account/transfers/offer",context=>handle(context,null,"transfer-offer"));
   app.all("/api/v1/account/transfers/cancel",context=>handle(context,null,"transfer-cancel"));
   app.all("/api/v1/account/transfers/export",context=>handle(context,null,"transfer-export"));
+  app.all("/api/v1/account/custody/managed",context=>handle(context,null,"custody-prepare"));
+  app.all("/api/v1/account/custody/owner-controlled/review",context=>handle(context,null,"custody-review-owner"));
+  app.all("/api/v1/account/custody/owner-controlled",context=>handle(context,null,"custody-prepare-owner"));
+  app.all("/api/v1/account/custody/managed/commit",context=>handle(context,null,"custody-commit"));
   app.all("/api/v1/account/binding",context=>handle(context,null,"binding"));
   app.all("/api/v1/account/messages",context=>handle(context,null,"send"));
   app.all("/api/v1/account/inbox",context=>handle(context,null,"inbox"));

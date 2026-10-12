@@ -4,7 +4,7 @@ import { loadConfig } from "../config.js";
 import { ProviderDatabase } from "../db/database.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { KeyEncryptor } from "../identity/key-encryption.js";
-import { MigrationTransferService } from "../migration/transfer.js";
+import { MigrationTransferService, validateTransferManifest } from "../migration/transfer.js";
 import { OnboardingRepository } from "../onboarding/repository.js";
 import { createHailDidResolver } from "../plc/public-resolver.js";
 
@@ -24,7 +24,7 @@ if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
   throw new Error("Invalid migration import container");
 }
 const envelope = parsed as Record<string, unknown>;
-if (envelope.type !== "hail.portable-migration-transfer" || envelope.version !== 2 ||
+if (envelope.type !== "hail.portable-migration-transfer" || ![2,3].includes(envelope.version as number) ||
   !["manifest", "digest", "signature", "sourceMessagingPublicKey"].every((key) => typeof envelope[key] === "string")) {
   throw new Error("Unsupported migration import container");
 }
@@ -43,6 +43,8 @@ const decode = (value: string) => {
   if (encodeBase64Url(bytes) !== value) throw new Error("Noncanonical migration import bytes");
   return bytes;
 };
+const manifestBytes=decode(envelope.manifest as string);
+if(validateTransferManifest(manifestBytes).version!==envelope.version)throw new Error("Migration container and manifest versions differ");
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
 try {
@@ -50,7 +52,7 @@ try {
   const manifest = await new MigrationTransferService(database.sql, new OnboardingRepository(database.sql),
     new KeyEncryptor(config.keyEncryptionKey),
     createHailDidResolver(config,database.sql), config.hailServiceBase)
-    .stageImport({ bytes: decode(envelope.manifest as string), digest: decode(envelope.digest as string),
+    .stageImport({ bytes: manifestBytes, digest: decode(envelope.digest as string),
       signature: decode(envelope.signature as string), sourceMessagingPublicKey: envelope.sourceMessagingPublicKey as string },
       { payloadBytes: decode(consent.payload), signature: decode(consent.signature) },
       new Uint8Array(await Bun.file(plcOperationFile).arrayBuffer()),

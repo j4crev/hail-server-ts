@@ -6,7 +6,7 @@ import type { TransferCancellationService } from "../migration/cancellation.js";
 import type { SignedHandshake } from "../migration/handshake.js";
 import { parseRequestWire } from "../migration/wire.js";
 import type { MigrationFenceService } from "../migration/fence.js";
-import type { MigrationTransferService } from "../migration/transfer.js";
+import { validateTransferManifest, type MigrationTransferService } from "../migration/transfer.js";
 
 export class AccountTransferError extends Error {constructor(readonly status:400|403|409,message:string){super(message);}}
 const wire=(signed:SignedHandshake)=>({payload:encodeBase64Url(signed.payloadBytes),signature:encodeBase64Url(signed.signature)});
@@ -57,7 +57,8 @@ export class AccountTransfer {
     const fence=await this.exports.fence.get(session.did);
     if(!fence||fence.accountId!==session.account_id||fence.transferId!==input.transferId||!["fenced","exported"].includes(fence.state))throw new AccountTransferError(409,"Matching fenced/exported source was not found");
     const snapshot=await this.exports.snapshots.exportFenced(fence);
-    return {type:"hail.portable-migration-transfer",version:2,manifest:encodeBase64Url(snapshot.bytes),digest:encodeBase64Url(snapshot.digest),
+    const version=validateTransferManifest(snapshot.bytes).version;
+    return {type:"hail.portable-migration-transfer",version,manifest:encodeBase64Url(snapshot.bytes),digest:encodeBase64Url(snapshot.digest),
       signature:encodeBase64Url(snapshot.signature),sourceMessagingPublicKey:snapshot.sourceMessagingPublicKey};
   }
   async status(session:AccountApiSession) {

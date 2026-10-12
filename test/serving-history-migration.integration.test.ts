@@ -26,9 +26,12 @@ integration("migration 36 serving metadata and immutable retirement history",()=
       AND table_name NOT IN ('schema_migrations','account_serving_generations','provider_retired_transfer_history','account_credential_generations',
          'account_challenge_generations','serving_worker_leases','provider_retired_import_history','provider_transfer_abandonments','provider_retired_observation_history',
          'public_cutover_evidence','public_cutover_evidence_selection','public_plc_resolution_evidence','public_envelope_authority_evidence','public_grant_authority_evidence','public_signing_authority_evidence',
-         'public_onboarding_preparations','public_onboarding_evidence') ORDER BY table_name`;
-    const result:Record<string,unknown>={};for(const {table_name} of tables){
-      const rows=await db.sql.unsafe(`SELECT count(*)::integer AS count,md5(COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'[]')) AS digest FROM "${table_name}" t`);
+         'public_onboarding_preparations','public_onboarding_evidence','custody_transition_preparations','custody_transition_grant_successors') ORDER BY table_name`;
+    const added:Record<string,string[]>={prepared_migration_target_keys:["custody_profile","identity_public_key","identity_private_ciphertext","identity_nonce"],
+      provider_transfer_authorizations:["custody_profile","owner_recovery_public_key"],provider_migration_fences:["source_custody_profile","owner_recovery_public_key","source_identity_public_key","destination_identity_public_key"],
+      provider_migration_exports:["custody_profile"],pending_migration_imports:["custody_profile","owner_recovery_public_key","source_identity_public_key","destination_identity_public_key"]};
+    const result:Record<string,unknown>={};for(const {table_name} of tables){const keys=added[table_name]??[],row=keys.length?`to_jsonb(t) - ARRAY[${keys.map(key=>`'${key}'`).join(",")}]::text[]`:"to_jsonb(t)";
+      const rows=await db.sql.unsafe(`SELECT count(*)::integer AS count,md5(COALESCE(jsonb_agg(${row} ORDER BY ${row}::text)::text,'[]')) AS digest FROM "${table_name}" t`);
       result[table_name]=rows[0];
     }return result;
   };
@@ -106,6 +109,9 @@ integration("migration 36 serving metadata and immutable retirement history",()=
     await db.migrate();expect((await db.sql`SELECT transfer_id FROM provider_retired_transfer_history`).length).toBe(2);
     expect(await fingerprints()).toEqual(beforeRollback);
     const current=await new AccountApiRepository(db.sql).authenticate(`Bearer ${original.credential.token}`);expect(current?.serving_generation).toBe(1);
+    await rollback("0047_managed_provider_migration.sql");
+    await rollback("0046_reverse_custody_transition.sql");
+    await rollback("0045_same_provider_custody_transition.sql");
     await rollback("0044_public_onboarding.sql");
     await rollback("0043_public_signing_authority.sql");
     await rollback("0042_public_grant_authority.sql");

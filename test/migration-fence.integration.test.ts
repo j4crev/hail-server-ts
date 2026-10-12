@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { cidForCbor } from "@atproto/common";
 import { P256Keypair } from "@atproto/crypto";
 import { didForCreateOp, signOperation, validateOperationLog, type Operation } from "@did-plc/lib";
-import { createWebCryptoSigner, encodeBase64Url, inspectSignedPayload, signPayload, type HailAddressBinding, type HailEnvelope, type HailGrant, type HailSenderProfile } from "@hailproto/codec";
+import { createWebCryptoSigner, encodeBase64Url, encodeDeterministic, inspectSignedPayload, signPayload, type HailAddressBinding, type HailEnvelope, type HailGrant, type HailSenderProfile } from "@hailproto/codec";
 import * as dagCbor from "@ipld/dag-cbor";
 import { base58btc } from "multiformats/bases/base58";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ import { KeyEncryptor } from "../src/identity/key-encryption.js";
 import { generateAccountKeys, importEd25519PrivateKey } from "../src/identity/keys.js";
 import { uuidV7 } from "../src/identity/uuid-v7.js";
 import { MigrationFenceService } from "../src/migration/fence.js";
-import { MigrationTransferService, type SignedTransferSnapshot } from "../src/migration/transfer.js";
+import { MigrationTransferService, validateTransferManifest, type SignedTransferSnapshot } from "../src/migration/transfer.js";
 import type { HailDidResolver, ResolvedHailDid } from "../src/plc/resolver.js";
 import { signPortableMigrationConsent, type SignedPortableConsent } from "../src/migration/consent.js";
 import { GrantRepository } from "../src/grants/repository.js";
@@ -685,6 +685,27 @@ integration("fenced transfer and concurrent cutover", () => {
 
   it("exports an immutable signed complete-domain snapshot and stages only an inert authenticated import", async () => {
     const fence = (await fenceService.get(did))!;
+    const profile = (await source.sql<{cose:Uint8Array}[]>`SELECT cose FROM sender_profiles WHERE account_id=${id}`)[0]!;
+    const grant = (await source.sql<{representation_digest:Uint8Array}[]>`SELECT representation_digest FROM grant_revisions
+      WHERE grant_id=${grantId} AND revision=1`)[0]!;
+    const envelope = (await source.sql<{message_id:string;recipient_did:string;envelope_cose:Uint8Array}[]>`
+      SELECT message_id,recipient_did,envelope_cose FROM sent_envelopes WHERE sender_account_id=${id} ORDER BY message_id LIMIT 1`)[0]!;
+    const verifiedAt = new Date().toISOString(), operationCid=(await cidForCbor(genesisOperation)).toString();
+    const evidenceBytes=encodeDeterministic({type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",
+      did,operation_cid:operationCid,verified_at:verifiedAt,witnesses:[]});
+    const evidenceDigest=new Uint8Array(createHash("sha256").update(evidenceBytes).digest());
+    const profileDigest=new Uint8Array(createHash("sha256").update(profile.cose).digest());
+    await source.sql`INSERT INTO public_plc_resolution_evidence(evidence_digest,did,operation_cid,verified_at,bundle_bytes)
+      VALUES(${evidenceDigest},${did},${operationCid},${verifiedAt},${evidenceBytes})`;
+    await source.sql`INSERT INTO public_signing_authority_evidence(action_type,local_account_id,authority_did,authority_role,
+      representation_digest,evidence_digest,committed_at) VALUES('sender-profile',${id},${did},'hail-messaging',
+      ${profileDigest},${evidenceDigest},${verifiedAt})`;
+    await source.sql`INSERT INTO public_grant_authority_evidence(grant_id,revision,local_account_id,local_role,purpose,
+      authority_did,representation_digest,evidence_digest,committed_at) VALUES(${grantId},1,${id},'grantor','signer',
+      ${did},${grant.representation_digest},${evidenceDigest},${verifiedAt})`;
+    await source.sql`INSERT INTO public_envelope_authority_evidence(sender_did,message_id,authority_did,recipient_did,
+      local_account_id,representation_digest,evidence_digest,accepted_at) VALUES(${did},${envelope.message_id},${did},
+      ${envelope.recipient_did},${id},${new Uint8Array(createHash("sha256").update(envelope.envelope_cose).digest())},${evidenceDigest},${verifiedAt})`;
     const snapshot = await transferSource.exportFenced(fence);
     const again = await transferSource.exportFenced(fence);
     expect(again.bytes).toEqual(snapshot.bytes);
@@ -718,6 +739,11 @@ integration("fenced transfer and concurrent cutover", () => {
     expect(manifest.did).toBe(did);
     expect(manifest.custodyProfile).toBe("portable");
     expect(manifest.tables.account_keys).toHaveLength(2);
+    expect(manifest.version).toBe(3);
+    expect(manifest.tables.public_plc_resolution_evidence).toHaveLength(1);
+    expect(manifest.tables.public_signing_authority_evidence).toHaveLength(1);
+    expect(manifest.tables.public_grant_authority_evidence).toHaveLength(1);
+    expect(manifest.tables.public_envelope_authority_evidence).toHaveLength(1);
     expect(manifest.tables.portable_custody_evidence).toHaveLength(1);
     expect(manifest.tables.account_keys.every((key) => !Object.hasOwn(key, "encrypted_private_key"))).toBe(true);
     await new PreparedMigrationTarget(target.sql, targetEncryption, targetBase).assertOwnership({
@@ -745,6 +771,14 @@ integration("fenced transfer and concurrent cutover", () => {
     changed.signature[0] = changed.signature[0]! ^ 1;
     await expect(transferTarget.stageImport(changed, consent, operationBytes, destinationBinding))
       .rejects.toThrow("signature is invalid");
+    const damagedHistory=JSON.parse(new TextDecoder().decode(snapshot.bytes));
+    damagedHistory.tables.public_plc_resolution_evidence=[];
+    expect(()=>validateTransferManifest(new TextEncoder().encode(JSON.stringify(damagedHistory))))
+      .toThrow("missing or unreferenced resolution evidence");
+    const legacy=JSON.parse(new TextDecoder().decode(snapshot.bytes));legacy.version=2;
+    for(const table of ["public_plc_resolution_evidence","public_envelope_authority_evidence",
+      "public_grant_authority_evidence","public_signing_authority_evidence"])delete legacy.tables[table];
+    expect(validateTransferManifest(new TextEncoder().encode(JSON.stringify(legacy))).version).toBe(2);
     const changedConsent: SignedPortableConsent = { ...consent, signature: Uint8Array.from(consent.signature) };
     changedConsent.signature[0] = changedConsent.signature[0]! ^ 1;
     await expect(transferTarget.stageImport(snapshot, changedConsent, operationBytes, destinationBinding))
@@ -902,6 +936,9 @@ integration("fenced transfer and concurrent cutover", () => {
     finally{await target.sql`UPDATE portable_cutover_observations SET state='eligible' WHERE transfer_id=${fence.transferId}`;}
     const rollbackConnection=await target.sql.reserve();
     try {
+      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
+      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());
+      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text());
       await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql",import.meta.url)).text());
       await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0043_public_signing_authority.sql",import.meta.url)).text());
       await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0042_public_grant_authority.sql",import.meta.url)).text());
@@ -1048,6 +1085,12 @@ integration("fenced transfer and concurrent cutover", () => {
     expect(pending[0]?.state).toBe("staged");
     await target.sql`DELETE FROM provider_accounts WHERE id = ${occupiedId}`;
     expect(await activation.activate(fence.transferId, await report())).toEqual({ did, accountId: id });
+    const retainedHistory = validateTransferManifest(new Uint8Array((await target.sql<{manifest_bytes:Uint8Array}[]>`
+      SELECT manifest_bytes FROM pending_migration_imports WHERE transfer_id=${fence.transferId}`)[0]!.manifest_bytes));
+    expect(retainedHistory.tables.public_plc_resolution_evidence).toHaveLength(1);
+    expect(retainedHistory.tables.public_envelope_authority_evidence).toHaveLength(1);
+    expect(retainedHistory.tables.public_grant_authority_evidence).toHaveLength(1);
+    expect(retainedHistory.tables.public_signing_authority_evidence).toHaveLength(1);
     const selection=(await target.sql<{activated_at:Date;evidence_digest:Uint8Array}[]>`
       SELECT activated_at,evidence_digest FROM public_cutover_evidence_selection WHERE transfer_id=${fence.transferId}`)[0]!;
     const activationTime=(await target.sql<{activated_at:Date}[]>`SELECT activated_at FROM pending_migration_imports WHERE transfer_id=${fence.transferId}`)[0]!.activated_at;

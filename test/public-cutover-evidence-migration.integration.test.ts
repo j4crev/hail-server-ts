@@ -12,6 +12,9 @@ it.skipIf(!process.env.DATABASE_URL)("migration 40 preserves legacy rows/auth an
   const rollback = async () => {
     const connection = await db.sql.reserve();
     try {
+      if((await connection`SELECT version FROM schema_migrations WHERE version=47`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
+      if((await connection`SELECT version FROM schema_migrations WHERE version=46`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());
+      if((await connection`SELECT version FROM schema_migrations WHERE version=45`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=44`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=43`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0043_public_signing_authority.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=42`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0042_public_grant_authority.sql",import.meta.url)).text());
@@ -41,12 +44,25 @@ it.skipIf(!process.env.DATABASE_URL)("migration 40 preserves legacy rows/auth an
     await db.sql`INSERT INTO portable_cutover_observations(transfer_id,did,operation_cid,first_seen_at,last_seen_at,mirror_origins,monitor_attestation_digest,state,assessment_profile)
       VALUES(${transfer},${did},'bafkreifixture',now(),now(),'["https://reader.example.com"]',${digest},'eligible','public')`;
     const fingerprint = async () => {
+      const added: Record<string, string[]> = {
+        prepared_migration_target_keys: ["custody_profile", "identity_public_key", "identity_private_ciphertext", "identity_nonce"],
+        provider_transfer_authorizations: ["custody_profile", "owner_recovery_public_key"],
+        provider_migration_fences: ["source_custody_profile", "owner_recovery_public_key", "source_identity_public_key", "destination_identity_public_key"],
+        provider_migration_exports: ["custody_profile"],
+        pending_migration_imports: ["custody_profile", "owner_recovery_public_key", "source_identity_public_key", "destination_identity_public_key"],
+      };
       const tables = await db.sql<{table_name:string}[]>`SELECT table_name FROM information_schema.tables
         WHERE table_schema=${schema} AND table_type='BASE TABLE' AND table_name NOT IN ('schema_migrations','public_cutover_evidence','public_cutover_evidence_selection',
           'public_plc_resolution_evidence','public_envelope_authority_evidence','public_grant_authority_evidence','public_signing_authority_evidence',
-          'public_onboarding_preparations','public_onboarding_evidence') ORDER BY table_name`;
-      return Promise.all(tables.map(async ({table_name}) => JSON.stringify(await db.sql.unsafe(
-        `SELECT count(*)::integer AS count, md5(COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'[]')) AS digest FROM "${table_name}" t`))));
+          'public_onboarding_preparations','public_onboarding_evidence','custody_transition_preparations','custody_transition_grant_successors') ORDER BY table_name`;
+      return Promise.all(tables.map(async ({table_name}) => {
+        const keys = added[table_name] ?? [];
+        const row = keys.length
+          ? `to_jsonb(t) - ARRAY[${keys.map((key) => `'${key}'`).join(",")}]::text[]`
+          : "to_jsonb(t)";
+        return JSON.stringify(await db.sql.unsafe(
+          `SELECT count(*)::integer AS count, md5(COALESCE(jsonb_agg(${row} ORDER BY (${row})::text)::text,'[]')) AS digest FROM "${table_name}" t`));
+      }));
     };
     const before = await fingerprint(), session = await accounts.authenticate(`Bearer ${credential.token}`);
     await db.migrate(); await db.migrate();

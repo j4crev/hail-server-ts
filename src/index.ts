@@ -52,6 +52,7 @@ import { PrivatePocCutoverGate } from "./migration/poc-cutover-gate.js";
 import { PrivatePocAddressPublication } from "./migration/poc-address-publication.js";
 import { PortableMigrationActivation } from "./migration/activation.js";
 import {withFreshServingGenerations} from "./db/serving.js";
+import { SameProviderCustodyTransition } from "./accounts/custody-transition.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -193,6 +194,11 @@ const app = createApp(config, schemaRehearsal ? {
     onboarding:new PrivatePocOnboarding(database.sql,plc,new KeyEncryptor(config.keyEncryptionKey),config.plcDirectoryUrl,config.hailServiceBase),
     activation:new ActivationService(onboardingRepository,new AddressVerifier(plc,transport.fetch,transport.validateTarget,undefined,resolver),config.hailServiceBase,"public"),provider:config.publicOrigin,profile:"private-poc" as const}} : {}),
   accountApi: { accounts: new AccountApiRepository(database.sql), grants: grantRepository,
+    ...(process.env.PUBLIC_CUSTODY_TRANSITIONS==="true"?(()=>{
+      if(config.nodeEnv!=="production"||!config.publicPlcAuthority||config.plcDirectoryUrl!=="https://plc.directory")
+        throw new Error("Public custody transitions require production strict public PLC authority");
+      return {custodyTransition:new SameProviderCustodyTransition(database.sql,plc,resolver,new KeyEncryptor(config.keyEncryptionKey),
+        config.hailServiceBase,new AddressVerifier(plc,transport.fetch,transport.validateTarget,undefined,resolver))};})():{}),
     ...(process.env.POC_SELF_SERVICE_TRANSFER==="true"?{transfer:new AccountTransfer(database.sql,
       new TransferGrantSubmission(database.sql,resolver,config.hailServiceBase,onboardingRepository,new KeyEncryptor(config.keyEncryptionKey),
         new TransferInvitationService(database.sql,resolver,config.hailServiceBase),invitationDelivery,transferRateLimit),

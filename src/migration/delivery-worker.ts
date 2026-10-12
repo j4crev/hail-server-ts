@@ -21,7 +21,7 @@ export class TransferDeliveryWorker {
     const invitations = await this.sql<InvitationClaim[]>`
       WITH due AS (
         SELECT did FROM provider_transfer_authorizations
-        WHERE origin_confirmed_at IS NULL AND consumed_transfer_id IS NULL AND cancelled_at IS NULL
+        WHERE custody_profile = 'portable' AND origin_confirmed_at IS NULL AND consumed_transfer_id IS NULL AND cancelled_at IS NULL
           AND expires_at > clock_timestamp() AND next_invitation_attempt_at <= clock_timestamp()
           AND (invitation_lease_expires_at IS NULL OR invitation_lease_expires_at <= clock_timestamp())
         ORDER BY next_invitation_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1

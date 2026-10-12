@@ -3,7 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { cidForCbor } from "@atproto/common";
 import { assureValidSig, def, validateOperationLog, type DocumentData } from "@did-plc/lib";
 import * as dagCbor from "@ipld/dag-cbor";
-import { createWebCryptoVerifier, decodePayload, inspectSignedPayload, verifySignedPayload } from "@hailproto/codec";
+import { createWebCryptoVerifier, decodeDeterministic, decodePayload, inspectSignedPayload,
+  verifySignedPayload, type HailValue } from "@hailproto/codec";
 import type { SQL } from "bun";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
@@ -16,9 +17,9 @@ import { verifyPortableMigrationConsent, type SignedPortableConsent } from "./co
 import type { MigrationFence } from "./fence.js";
 import { PreparedMigrationTarget } from "./target-keys.js";
 import {validateReturningEvidence} from "./return.js";
+import { PUBLIC_EVIDENCE_LIMITS } from "../plc/read-evidence.js";
 
-const CONTEXT = new TextEncoder().encode("hail-migration-snapshot-v2\0");
-const MANIFEST_VERSION = 2;
+const context = (version: 2 | 3) => new TextEncoder().encode(`hail-migration-snapshot-v${version}\0`);
 
 export const TRANSFER_TABLES = [
   "provider_accounts", "account_keys", "portable_custody_evidence", "plc_operation_evidence", "address_bindings",
@@ -28,9 +29,17 @@ export const TRANSFER_TABLES = [
   "delivered_messages", "delivery_status_payloads", "delivery_status_wrappers",
   "terminal_status_publications", "sent_delivery_status",
 ] as const;
+export const TRANSFER_AUTHORITY_TABLES = [
+  "public_plc_resolution_evidence", "public_envelope_authority_evidence",
+  "public_grant_authority_evidence", "public_signing_authority_evidence",
+] as const;
+type TransferTable = (typeof TRANSFER_TABLES)[number];
+type AuthorityTable = (typeof TRANSFER_AUTHORITY_TABLES)[number];
+type TransferTables = Record<TransferTable, Record<string, unknown>[]> &
+  Partial<Record<AuthorityTable, Record<string, unknown>[]>>;
 
 export interface TransferManifest {
-  version: 2;
+  version: 2 | 3;
   transferId: string;
   did: string;
   accountId: string;
@@ -40,7 +49,7 @@ export interface TransferManifest {
   destinationMessagingPublicKey: string;
   custodyProfile: "portable";
   capturedAt: string;
-  tables: Record<(typeof TRANSFER_TABLES)[number], Record<string, unknown>[]>;
+  tables: TransferTables;
 }
 
 export interface SignedTransferSnapshot {
@@ -59,10 +68,11 @@ interface ExportRow {
 
 function digest(bytes: Uint8Array): Uint8Array { return new Uint8Array(createHash("sha256").update(bytes).digest()); }
 
-function signatureInput(hash: Uint8Array): Uint8Array<ArrayBuffer> {
-  const message = new Uint8Array(CONTEXT.length + hash.length);
-  message.set(CONTEXT);
-  message.set(hash, CONTEXT.length);
+function signatureInput(hash: Uint8Array, version: 2 | 3): Uint8Array<ArrayBuffer> {
+  const prefix = context(version);
+  const message = new Uint8Array(prefix.length + hash.length);
+  message.set(prefix);
+  message.set(hash, prefix.length);
   return message;
 }
 
@@ -83,12 +93,69 @@ function mustHaveRows(table: string, rows: Record<string, unknown>[], known: Set
   }
 }
 
+function hexKey(value: unknown, label: string): string {
+  return Buffer.from(decodeHex(value, label)).toString("hex");
+}
+
+function validateAuthorityHistory(manifest: TransferManifest): void {
+  const resolutions = manifest.tables.public_plc_resolution_evidence!;
+  const envelopes = manifest.tables.public_envelope_authority_evidence!;
+  const grants = manifest.tables.public_grant_authority_evidence!;
+  const signing = manifest.tables.public_signing_authority_evidence!;
+  const links = [...envelopes, ...grants, ...signing];
+  if (links.some((row) => row.local_account_id !== manifest.accountId)) {
+    throw new Error("Transfer authority history contains another account");
+  }
+  const referenced = new Set(links.map((row) => hexKey(row.evidence_digest, "authority evidence digest")));
+  const retained = new Map<string, Record<string, unknown>>();
+  for (const row of resolutions) {
+    const digestKey = hexKey(row.evidence_digest, "resolution evidence digest");
+    const bytes = decodeHex(row.bundle_bytes, "resolution evidence bundle");
+    if (!Buffer.from(digest(bytes)).equals(Buffer.from(decodeHex(row.evidence_digest, "resolution evidence digest")))) {
+      throw new Error("Transfer resolution evidence digest does not match its bundle");
+    }
+    const bundle = decodeDeterministic(bytes, PUBLIC_EVIDENCE_LIMITS) as Record<string, HailValue>;
+    if (bundle.type !== "hail.public-plc-resolution" || bundle.version !== 1 ||
+      bundle.policy !== "strict-public-v1" || bundle.did !== row.did ||
+      bundle.operation_cid !== row.operation_cid || typeof bundle.verified_at !== "string" ||
+      typeof row.verified_at !== "string" || Date.parse(bundle.verified_at) !== Date.parse(row.verified_at) ||
+      retained.has(digestKey)) {
+      throw new Error("Transfer resolution evidence metadata is invalid or duplicated");
+    }
+    retained.set(digestKey, row);
+  }
+  if (retained.size !== referenced.size || [...referenced].some((key) => !retained.has(key))) {
+    throw new Error("Transfer authority history has missing or unreferenced resolution evidence");
+  }
+  for (const row of links) {
+    const resolution = retained.get(hexKey(row.evidence_digest, "authority evidence digest"));
+    if (!resolution || resolution.did !== row.authority_did) {
+      throw new Error("Transfer authority link names the wrong retained DID evidence");
+    }
+  }
+  const representations = {
+    envelope: new Set([...manifest.tables.sent_envelopes, ...manifest.tables.received_envelopes]
+      .map((row) => Buffer.from(digest(decodeHex(row.envelope_cose, "envelope representation"))).toString("hex"))),
+    grant: new Set(manifest.tables.grant_revisions.map((row) => hexKey(row.representation_digest, "Grant authority digest"))),
+    "address-binding": new Set(manifest.tables.address_bindings.map((row) => Buffer.from(digest(decodeHex(row.cose, "Address Binding representation"))).toString("hex"))),
+    "sender-profile": new Set(manifest.tables.sender_profiles.map((row) => Buffer.from(digest(decodeHex(row.cose, "Sender Profile representation"))).toString("hex"))),
+    "delivery-status": new Set(manifest.tables.delivery_status_wrappers.map((row) => Buffer.from(digest(decodeHex(row.cose, "Delivery Status representation"))).toString("hex"))),
+  };
+  if (envelopes.some((row) => !representations.envelope.has(hexKey(row.representation_digest, "envelope authority digest"))) ||
+    grants.some((row) => !representations.grant.has(hexKey(row.representation_digest, "Grant authority digest"))) ||
+    signing.some((row) => !representations[row.action_type as keyof typeof representations]?.has(
+      hexKey(row.representation_digest, "signing authority digest")))) {
+    throw new Error("Transfer authority history does not match a retained signed representation");
+  }
+}
+
 export function validateTransferManifest(bytes: Uint8Array): TransferManifest {
   if (bytes.length < 1 || bytes.length > 67_108_864) throw new Error("Transfer manifest exceeds its size limit");
   const value = parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid transfer manifest");
   const manifest = value as TransferManifest;
-  if (manifest.version !== MANIFEST_VERSION ||
+  const tables = manifest.version === 3 ? [...TRANSFER_TABLES, ...TRANSFER_AUTHORITY_TABLES] : TRANSFER_TABLES;
+  if (![2, 3].includes(manifest.version) ||
     !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(manifest.transferId) ||
     !/^did:plc:[a-z2-7]{24}$/.test(manifest.did) ||
     !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(manifest.accountId) ||
@@ -98,8 +165,8 @@ export function validateTransferManifest(bytes: Uint8Array): TransferManifest {
     !manifest.destinationRotationPublicKey.startsWith("did:key:z") ||
     typeof manifest.destinationMessagingPublicKey !== "string" ||
     !manifest.tables || typeof manifest.tables !== "object" || Array.isArray(manifest.tables) ||
-    Object.keys(manifest.tables).length !== TRANSFER_TABLES.length ||
-    TRANSFER_TABLES.some((table) => !Array.isArray(manifest.tables[table]))) {
+    Object.keys(manifest.tables).length !== tables.length ||
+    tables.some((table) => !Array.isArray(manifest.tables[table]))) {
     throw new Error("Transfer manifest has an invalid or incomplete serialization domain");
   }
   if (canonicalizeHailServiceBase(manifest.sourceServiceBase) !== manifest.sourceServiceBase ||
@@ -263,6 +330,7 @@ export function validateTransferManifest(bytes: Uint8Array): TransferManifest {
       throw new Error("Transfer reply claim conflicts with its signed permission or accepted reply");
     }
   }
+  if (manifest.version === 3) validateAuthorityHistory(manifest);
   return manifest;
 }
 
@@ -309,7 +377,7 @@ export class MigrationTransferService {
       }
       if (current[0].state !== "fenced") throw new Error("Migration source has retired");
       const tables = await this.collect(tx, fence.did, fence.accountId);
-      const manifest: TransferManifest = { version: 2, did: fence.did, accountId: fence.accountId,
+      const manifest: TransferManifest = { version: 3, did: fence.did, accountId: fence.accountId,
         transferId: fence.transferId, sourceServiceBase: this.serviceBase,
         destinationServiceBase: fence.destinationServiceBase,
         destinationRotationPublicKey: fence.destinationRotationPublicKey,
@@ -323,7 +391,7 @@ export class MigrationTransferService {
       let signature: Uint8Array;
       try {
         const key = await importEd25519PrivateKey(secret);
-        signature = new Uint8Array(await crypto.subtle.sign("Ed25519", key, signatureInput(hash)));
+        signature = new Uint8Array(await crypto.subtle.sign("Ed25519", key, signatureInput(hash, manifest.version)));
       } finally { secret.fill(0); }
       await tx`
         INSERT INTO provider_migration_exports (transfer_id, did, manifest_bytes, manifest_digest,
@@ -351,7 +419,7 @@ export class MigrationTransferService {
       throw new Error("Current PLC state does not authenticate the source snapshot");
     }
     const key = await ed25519PublicKeyFromDidKey(snapshot.sourceMessagingPublicKey);
-    if (!await crypto.subtle.verify("Ed25519", key, Uint8Array.from(snapshot.signature), signatureInput(hash))) {
+    if (!await crypto.subtle.verify("Ed25519", key, Uint8Array.from(snapshot.signature), signatureInput(hash, manifest.version))) {
       throw new Error("Migration snapshot source signature is invalid");
     }
     const consent = await verifyPortableMigrationConsent(userConsent, resolved.identityDidKey, Math.floor(Date.now() / 1000));
@@ -545,6 +613,18 @@ export class MigrationTransferService {
       ON owner.sender_did = t.sender_did AND owner.message_id = t.message_id
       WHERE owner.local_account_id = ${accountId} ORDER BY t.sender_did, t.message_id`);
     const sentStatus = await collect(tx`SELECT to_jsonb(t) AS row FROM sent_delivery_status t WHERE sender_did = ${did} ORDER BY message_id`);
+    const envelopeAuthority = await collect(tx`SELECT to_jsonb(t) AS row FROM public_envelope_authority_evidence t
+      WHERE local_account_id = ${accountId} ORDER BY sender_did, message_id, authority_did`);
+    const grantAuthority = await collect(tx`SELECT to_jsonb(t) AS row FROM public_grant_authority_evidence t
+      WHERE local_account_id = ${accountId} ORDER BY grant_id, revision, purpose`);
+    const signingAuthority = await collect(tx`SELECT to_jsonb(t) AS row FROM public_signing_authority_evidence t
+      WHERE local_account_id = ${accountId} ORDER BY action_type, representation_digest`);
+    const resolutionAuthority = await collect(tx`SELECT to_jsonb(t) AS row FROM public_plc_resolution_evidence t
+      WHERE evidence_digest IN (
+        SELECT evidence_digest FROM public_envelope_authority_evidence WHERE local_account_id = ${accountId}
+        UNION SELECT evidence_digest FROM public_grant_authority_evidence WHERE local_account_id = ${accountId}
+        UNION SELECT evidence_digest FROM public_signing_authority_evidence WHERE local_account_id = ${accountId}
+      ) ORDER BY evidence_digest`);
     return {
       provider_accounts: account, account_keys: keys, portable_custody_evidence: custody,
       plc_operation_evidence: plc,
@@ -558,6 +638,10 @@ export class MigrationTransferService {
       verified_body_provenance: provenance, delivered_messages: messages,
       delivery_status_payloads: statuses, delivery_status_wrappers: wrappers,
       terminal_status_publications: terminal, sent_delivery_status: sentStatus,
+      public_plc_resolution_evidence: resolutionAuthority,
+      public_envelope_authority_evidence: envelopeAuthority,
+      public_grant_authority_evidence: grantAuthority,
+      public_signing_authority_evidence: signingAuthority,
     };
   }
 }

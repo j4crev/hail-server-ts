@@ -186,6 +186,9 @@ const migrations: readonly Migration[] = [
   { version: 42, name: "public-grant-authority", url: new URL("../../migrations/0042_public_grant_authority.sql", import.meta.url) },
   { version: 43, name: "public-signing-authority", url: new URL("../../migrations/0043_public_signing_authority.sql", import.meta.url) },
   { version: 44, name: "public-onboarding", url: new URL("../../migrations/0044_public_onboarding.sql", import.meta.url) },
+  { version: 45, name: "same-provider-custody-transition", url: new URL("../../migrations/0045_same_provider_custody_transition.sql", import.meta.url) },
+  { version: 46, name: "reverse-custody-transition", url: new URL("../../migrations/0046_reverse_custody_transition.sql", import.meta.url) },
+  { version: 47, name: "managed-provider-migration", url: new URL("../../migrations/0047_managed_provider_migration.sql", import.meta.url) },
 ];
 
 export class ProviderDatabase {

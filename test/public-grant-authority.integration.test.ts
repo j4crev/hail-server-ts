@@ -65,6 +65,9 @@ it.skipIf(!process.env.DATABASE_URL)("public Grant revisions/imports retain exac
     await expect(db.sql`UPDATE public_grant_authority_evidence SET purpose='signer'`).rejects.toThrow("immutable");
     await expect(db.sql`DELETE FROM public_grant_authority_evidence`).rejects.toThrow("immutable");
     const connection=await db.sql.reserve();try{
+      await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
+      await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());
+      await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text());
       await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql",import.meta.url)).text());
       await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0043_public_signing_authority.sql",import.meta.url)).text());
       await expect(connection.unsafe(await Bun.file(new URL("../migrations/rollback/0042_public_grant_authority.sql",import.meta.url)).text())).rejects.toThrow("prevent rollback");}

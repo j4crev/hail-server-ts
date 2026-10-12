@@ -280,7 +280,7 @@ integration("private PLC transfer between disposable POC providers", () => {
         writeFile(paths.vault, JSON.stringify(client.vault), { mode: 0o600 }),
         writeFile(paths.state,retainedTransferState,{mode:0o600}),
         writeFile(paths.snapshot, JSON.stringify({ type: "hail.portable-migration-transfer",
-          version: 2, manifest: encodeBase64Url(signedSnapshot.bytes),
+          version: 3, manifest: encodeBase64Url(signedSnapshot.bytes),
           digest: encodeBase64Url(signedSnapshot.digest),
           signature: encodeBase64Url(signedSnapshot.signature),
           sourceMessagingPublicKey: signedSnapshot.sourceMessagingPublicKey }), { mode: 0o600 }),
@@ -584,6 +584,9 @@ integration("private PLC transfer between disposable POC providers", () => {
       const invalidation=await invalidating;expect(await withFreshServingGenerations(target.sql,()=>targetAbandon.invalidate(intent))).toEqual(invalidation);
       expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence`).toHaveLength(0);
       const rollbackTarget=await target.sql.reserve();try {
+        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
+        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());
+        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text());
         await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql",import.meta.url)).text());
         await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0043_public_signing_authority.sql",import.meta.url)).text());
         await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0042_public_grant_authority.sql",import.meta.url)).text());

@@ -22,6 +22,12 @@ export interface GeneratedAccountKeys {
   messagingDidKey: string;
 }
 
+export interface GeneratedAccountIdentityKey {
+  privateKey: CryptoKey;
+  key: StoredAccountKey;
+  didKey: string;
+}
+
 function ed25519DidKey(publicKey: CryptoKey): Promise<string> {
   return crypto.subtle.exportKey("raw", publicKey).then((value) => {
     const raw = new Uint8Array(value);
@@ -44,6 +50,34 @@ async function generateEd25519(): Promise<{
     privateBytes: new Uint8Array(await crypto.subtle.exportKey("pkcs8", pair.privateKey)),
     didKey: await ed25519DidKey(pair.publicKey),
   };
+}
+
+export async function generateAccountIdentityKey(
+  accountId: string,
+  encryptor: KeyEncryptor,
+): Promise<GeneratedAccountIdentityKey> {
+  const identity = await generateEd25519();
+  try {
+    const encrypted = await encryptor.encrypt(
+      accountId,
+      "hail-identity",
+      "ed25519",
+      identity.didKey,
+      identity.privateBytes,
+    );
+    return {
+      privateKey: identity.privateKey,
+      didKey: identity.didKey,
+      key: {
+        role: "hail-identity",
+        algorithm: "ed25519",
+        publicKey: identity.didKey,
+        ...encrypted,
+      },
+    };
+  } finally {
+    identity.privateBytes.fill(0);
+  }
 }
 
 export async function generateAccountKeys(
