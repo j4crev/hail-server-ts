@@ -12,6 +12,7 @@ it.skipIf(!process.env.DATABASE_URL)("migration 40 preserves legacy rows/auth an
   const rollback = async () => {
     const connection = await db.sql.reserve();
     try {
+      if((await connection`SELECT version FROM schema_migrations WHERE version=49`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=48`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=47`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=46`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());

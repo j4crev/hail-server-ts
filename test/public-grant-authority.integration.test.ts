@@ -65,6 +65,8 @@ it.skipIf(!process.env.DATABASE_URL)("public Grant revisions/imports retain exac
     await expect(db.sql`UPDATE public_grant_authority_evidence SET purpose='signer'`).rejects.toThrow("immutable");
     await expect(db.sql`DELETE FROM public_grant_authority_evidence`).rejects.toThrow("immutable");
     const connection=await db.sql.reserve();try{
+      if((await connection`SELECT version FROM schema_migrations WHERE version=49`).length)
+        await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=48`).length)
         await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql",import.meta.url)).text());
       await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());

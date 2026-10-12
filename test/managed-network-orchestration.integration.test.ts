@@ -2,8 +2,8 @@ import {createHash,randomBytes,randomUUID} from "node:crypto";
 import {cidForCbor} from "@atproto/common";
 import {P256Keypair} from "@atproto/crypto";
 import {didForCreateOp,signOperation,validateOperationLog} from "@did-plc/lib";
-import {createWebCryptoSigner,createWebCryptoVerifier,decodeBase64Url,encodeBase64Url,signPayload,
-  verifySignedPayload,type HailGrant} from "@hailproto/codec";
+import {createWebCryptoSigner,createWebCryptoVerifier,decodeBase64Url,decodeDeterministic,encodeBase64Url,encodeDeterministic,signPayload,
+  verifySignedPayload,type HailEnvelope,type HailGrant,type HailValue} from "@hailproto/codec";
 import {SQL} from "bun";
 import {Hono} from "hono";
 import {expect,it} from "vitest";
@@ -24,20 +24,23 @@ import {ManagedTransferFencePublisher} from "../src/migration/managed-fence-publ
 import {ManagedMigrationExportService,managedSnapshotSignatureInput,
   validateManagedTransferManifest} from "../src/migration/managed-snapshot.js";
 import {ManagedMigrationStageService} from "../src/migration/managed-stage.js";
+import {ManagedMigrationPlcSubmission} from "../src/migration/managed-plc-submission.js";
+import {ManagedMigrationActivation} from "../src/migration/managed-activation.js";
+import {replaceRetiredManagedProjection,validateManagedReturningEvidence} from "../src/migration/return.js";
 import {encodeManagedHandshake,managedHandshakeSignatureInput,type ManagedTransferAddressSelection,
-  managedHandshakeDigest,verifyManagedProviderHandshake,type ManagedTransferApproval,
-  type ManagedTransferGrant} from "../src/migration/managed-handshake.js";
+  managedHandshakeDigest,signManagedProviderHandshake,verifyManagedProviderHandshake,type ManagedTransferAcknowledgement,
+  type ManagedTransferApproval,type ManagedTransferGrant} from "../src/migration/managed-handshake.js";
 import {ManagedTransferInvitationReceiver} from "../src/migration/managed-invitation-receiver.js";
 import {registerManagedTransferRoutes} from "../src/migration/routes.js";
 import {PreparedMigrationTarget} from "../src/migration/target-keys.js";
 import {OnboardingRepository} from "../src/onboarding/repository.js";
-import {withFreshServingGenerations} from "../src/db/serving.js";
+import {withFreshServingGenerations,withServingGeneration} from "../src/db/serving.js";
 import {TransferDeliveryWorker} from "../src/migration/delivery-worker.js";
 import {finalRequestWire,parseRequestWire,requestWire,TRANSFER_MEDIA_TYPE} from "../src/migration/wire.js";
 
 const integration=process.env.DATABASE_URL?it:it.skip;
 
-integration("orchestrates the exact managed Offer, reservation, retry and source fence across fixed HTTPS routes",async()=>{
+integration("materializes an exact managed A to B to A round trip across fixed HTTPS routes",async()=>{
   const admin=new SQL(process.env.DATABASE_URL!),suffix=randomUUID().replaceAll("-",""),sourceSchema=`managed_net_a_${suffix}`,
     targetSchema=`managed_net_b_${suffix}`;await admin.unsafe(`CREATE SCHEMA "${sourceSchema}"`);await admin.unsafe(`CREATE SCHEMA "${targetSchema}"`);
   const scoped=(schema:string)=>{const url=new URL(process.env.DATABASE_URL!);url.searchParams.set("options",`-csearch_path=${schema}`);return url.toString();};
@@ -65,12 +68,15 @@ integration("orchestrates the exact managed Offer, reservation, retry and source
       scope:[{type:"uncategorized"}],status:"active",issued_at:grantNow,updated_at:grantNow,expires_at:null,
       consent_context:{grantee_address:"peer@peer.example.com",address_binding_hash:{algorithm:"sha-256",value:randomBytes(32)},
         sender_profile_hash:{algorithm:"sha-256",value:randomBytes(32)}},key_id:`${did}#hail-identity`};
-    const identityRecord=keys.keys.find(key=>key.role==="hail-identity")!,identitySecret=await sourceEncryptor.decrypt(
+    const terminalGrantId=uuidV7(),terminalGrant:HailGrant={...grant,grant_id:terminalGrantId,status:"revoked"},
+      identityRecord=keys.keys.find(key=>key.role==="hail-identity")!,identitySecret=await sourceEncryptor.decrypt(
       accountId,identityRecord.role,identityRecord.algorithm,identityRecord.publicKey,identityRecord);
-    let grantCose:Uint8Array;
-    try {grantCose=await signPayload("hail.grant",grant,createWebCryptoSigner(`${did}#hail-identity`,
-      await importEd25519PrivateKey(identitySecret)));} finally {identitySecret.fill(0);}
-    const grantDigest=new Uint8Array(createHash("sha256").update(grantCose).digest());
+    let grantCose:Uint8Array,terminalGrantCose:Uint8Array;
+    try {const signer=createWebCryptoSigner(`${did}#hail-identity`,await importEd25519PrivateKey(identitySecret));
+      [grantCose,terminalGrantCose]=await Promise.all([signPayload("hail.grant",grant,signer),signPayload("hail.grant",terminalGrant,signer)]);}
+    finally {identitySecret.fill(0);}
+    const grantDigest=new Uint8Array(createHash("sha256").update(grantCose).digest()),
+      terminalGrantDigest=new Uint8Array(createHash("sha256").update(terminalGrantCose).digest());
     await source.sql`INSERT INTO grant_lineages(grant_id,local_account_id,local_role,grantor_did,grantee_did,
       current_revision,current_digest,current_status) VALUES (${grantId},${accountId},'grantor',${did},${grantee},1,${grantDigest},'active')`;
     await source.sql`INSERT INTO grant_revisions(grant_id,revision,status,issued_at,updated_at,expires_at,previous_digest,
@@ -81,6 +87,14 @@ integration("orchestrates the exact managed Offer, reservation, retry and source
         ${grantCose},${grantDigest},${keys.identityDidKey},'{}','{}','[]')`;
     await source.sql`INSERT INTO grant_publications(grant_id,revision,destination_service_base,state)
       VALUES (${grantId},1,'https://peer.example.com/hail','pending')`;
+    await source.sql`INSERT INTO grant_lineages(grant_id,local_account_id,local_role,grantor_did,grantee_did,
+      current_revision,current_digest,current_status) VALUES (${terminalGrantId},${accountId},'grantor',${did},${grantee},1,${terminalGrantDigest},'revoked')`;
+    await source.sql`INSERT INTO grant_revisions(grant_id,revision,status,issued_at,updated_at,expires_at,previous_digest,
+      scope_payload,consent_address_binding_sha256,consent_sender_profile_sha256,cose,representation_digest,
+      signing_public_key,signing_plc_document,signing_plc_data,signing_plc_operation_log)
+      VALUES (${terminalGrantId},1,'revoked',${grantNow},${grantNow},NULL,NULL,${JSON.stringify(terminalGrant.scope)}::jsonb,
+        ${terminalGrant.consent_context.address_binding_hash.value},${terminalGrant.consent_context.sender_profile_hash.value},
+        ${terminalGrantCose},${terminalGrantDigest},${keys.identityDidKey},'{}','{}','[]')`;
     const bodyBytes=bodyFromText("managed continuity"),bodyHash=new Uint8Array(createHash("sha256").update(bodyBytes).digest()),
       bodyToken=randomBytes(32),bodyTokenHash=new Uint8Array(createHash("sha256").update(bodyToken).digest());
     await source.sql`INSERT INTO detached_bodies(digest,sender_account_id,body_bytes,available_until)
@@ -88,11 +102,25 @@ integration("orchestrates the exact managed Offer, reservation, retry and source
     await source.sql`INSERT INTO body_authorizations(token_hash,body_digest,sender_account_id,recipient_did,message_id,
       expires_at,available_until) VALUES (${bodyTokenHash},${bodyHash},${accountId},${grantee},${uuidV7()},
         ${grantNow+7200},${grantNow+7200})`;
-    const resolver={async resolve(value:string){if(value!==did)throw new Error("unknown DID");return {did,
-      identityDidKey:keys.identityDidKey,messagingDidKey:keys.messagingDidKey,serviceBase:sourceBase,
-      evidence:{document:{},data:currentState,log:[genesis],verification:{profile:"strict-public-v1" as const,
-        digest:"fixture",operationCid:genesisCid,verifiedAt:new Date().toISOString()}}};}};
-    const targetKeys=new PreparedMigrationTarget(target.sql,new KeyEncryptor(encodeBase64Url(randomBytes(32))),targetBase);
+    const incomingId=uuidV7(),remotePair=await crypto.subtle.generateKey("Ed25519",true,["sign","verify"]),incoming:HailEnvelope={
+      type:"hail.envelope",version:1,message_id:incomingId,from:grantee,to:did,authorization:{type:"grant",grant_id:grantId},
+      created_at:grantNow,expires_at:grantNow+3600,body:{digest:{algorithm:"sha-256",value:bodyHash},size:bodyBytes.length,
+        media_type:"application/hail-body+cbor",profile:"spt-1",available_until:grantNow+31*86400,
+        access:{type:"bearer",token:randomBytes(32),expires_at:grantNow+31*86400}},reply:{allowed:false}};
+    const incomingCose=await signPayload("hail.envelope",incoming,createWebCryptoSigner(`${grantee}#hail-messaging`,remotePair.privateKey)),
+      incomingDigest=new Uint8Array(createHash("sha256").update((await verifySignedPayload("hail.envelope",incomingCose,
+        createWebCryptoVerifier(()=>remotePair.publicKey))).payloadBytes).digest());
+    await source.sql`INSERT INTO received_envelopes(sender_did,message_id,recipient_did,grant_id,authorization_type,local_account_id,
+      envelope_cose,envelope_digest,payload_digest,signing_public_key,signing_plc_document,signing_plc_data,signing_plc_operation_log,outcome,accepted_at)
+      VALUES(${grantee},${incomingId},${did},${grantId},'grant',${accountId},${incomingCose},${incomingDigest},${incomingDigest},
+        'fixture','{}'::jsonb,'{}'::jsonb,'[]'::jsonb,'accepted',now())`;
+    await source.sql`INSERT INTO delivery_work(sender_did,message_id) VALUES(${grantee},${incomingId})`;
+    let plcLog=[genesis];
+    const resolver={async resolve(value:string){if(value!==did)throw new Error("unknown DID");const data=(await validateOperationLog(did,plcLog))!,last=plcLog.at(-1)!;
+      return {did,identityDidKey:data.verificationMethods["hail-identity"]!,messagingDidKey:data.verificationMethods["hail-messaging"]!,
+        serviceBase:data.services.hail!.endpoint,evidence:{document:{},data,log:plcLog,verification:{profile:"strict-public-v1" as const,
+          digest:"fixture",operationCid:(await cidForCbor(last)).toString(),verifiedAt:new Date().toISOString()}}};}};
+    const targetEncryptor=new KeyEncryptor(encodeBase64Url(randomBytes(32))),targetKeys=new PreparedMigrationTarget(target.sql,targetEncryptor,targetBase);
     const destination=new Hono(),receiver=new ManagedTransferInvitationReceiver(target.sql,resolver,targetKeys);
     const accounts=new AccountApiRepository(source.sql),credential=await accounts.issue("alice@a.example.com",false,undefined,["account:read","account:write"]);
     const onboarding=new OnboardingRepository(source.sql);
@@ -312,6 +340,189 @@ integration("orchestrates the exact managed Offer, reservation, retry and source
     expect((await source.sql`SELECT 1 FROM provider_transfer_authorizations WHERE did=${did} AND custody_profile='managed' AND origin_confirmed_at IS NOT NULL`)).toHaveLength(1);
     expect((await target.sql`SELECT 1 FROM prepared_migration_target_keys WHERE did=${did} AND custody_profile='managed'`)).toHaveLength(1);
     expect((await target.sql`SELECT 1 FROM received_transfer_invitations WHERE did=${did}`)).toHaveLength(1);
+    let submissions=0;
+    const plc={async getOperationLog(){return plcLog;},async sendOperation(_did:string,operation:typeof cutover){
+      submissions++;plcLog=[...plcLog,operation];throw new Error("lost PLC response");}};
+    const submitter=new ManagedMigrationPlcSubmission(target.sql,plc,resolver,targetBase);
+    await expect(submitter.submit(offer.transfer_id)).resolves.toBe(cutoverCid);
+    await expect(submitter.submit(offer.transfer_id)).resolves.toBe(cutoverCid);
+    expect(submissions).toBe(1);
+    const disagreeing={async resolve(value:string){return {...await resolver.resolve(value),serviceBase:sourceBase};}};
+    await expect(new ManagedMigrationPlcSubmission(target.sql,plc,disagreeing,targetBase).submit(offer.transfer_id))
+      .rejects.toThrow(/Independent readers/);
+    const destinationState=(await validateOperationLog(did,plcLog))!,verifiedAt=new Date().toISOString();
+    const bundle=encodeDeterministic({type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",did,
+      operation_cid:cutoverCid,verified_at:verifiedAt,witnesses:[{state:destinationState},{state:destinationState}]} as unknown as HailValue),
+      evidenceDigest=new Uint8Array(createHash("sha256").update(bundle).digest());
+    await target.sql`INSERT INTO public_plc_resolution_evidence(evidence_digest,did,operation_cid,verified_at,bundle_bytes)
+      VALUES(${evidenceDigest},${did},${cutoverCid},${verifiedAt},${bundle})`;
+    const strictResolver={async resolve(value:string){const result=await resolver.resolve(value);return {...result,evidence:{...result.evidence,
+      verification:{profile:"strict-public-v1" as const,digest:encodeBase64Url(evidenceDigest),operationCid:cutoverCid,verifiedAt}}};}};
+    const binding=decodeDeterministic((await verifySignedPayload("hail.address-binding",new Uint8Array(staged.destination_binding_cose),
+      createWebCryptoVerifier(()=>ed25519PublicKeyFromDidKey(offer.destination_identity_key)))).payloadBytes) as any;
+    const verifier={async verify(address:string){return {address,did,serviceBase:targetBase,identityDidKey:offer.destination_identity_key,
+      messagingDidKey:offer.destination_messaging_key,plcEvidence:(await strictResolver.resolve(did)).evidence,verifiedAt:new Date(),
+      binding,representation:new Uint8Array(staged.destination_binding_cose),digest:new Uint8Array(createHash("sha256").update(staged.destination_binding_cose).digest())};}};
+    const activation=new ManagedMigrationActivation(target.sql,targetEncryptor,strictResolver,verifier,targetBase,"http://plc.fixture:2582");
+    expect(await withFreshServingGenerations(target.sql,()=>activation.activate(offer.transfer_id)))
+      .toEqual({did,accountId,generation:2});
+    expect(await withFreshServingGenerations(target.sql,()=>activation.activate(offer.transfer_id)))
+      .toEqual({did,accountId,generation:2});
+    expect((await target.sql<{onboarding_state:string;canonical_address:string}[]>`SELECT onboarding_state,canonical_address
+      FROM provider_accounts WHERE id=${accountId} AND did=${did}`)[0]).toEqual({onboarding_state:"active",canonical_address:"alice@b.example.com"});
+    expect(Number((await target.sql<{generation:number|string}[]>`SELECT generation FROM account_serving_generations WHERE account_id=${accountId}`)[0]?.generation)).toBe(2);
+    expect((await target.sql<{provider_identity_public_key:string}[]>`SELECT provider_identity_public_key FROM managed_custody_evidence
+      WHERE account_id=${accountId}`)[0]?.provider_identity_public_key).toBe(offer.destination_identity_key);
+    expect(await target.sql`SELECT 1 FROM account_keys WHERE account_id=${accountId} AND public_key IN
+      (${offer.destination_rotation_key},${offer.destination_identity_key},${offer.destination_messaging_key})`).toHaveLength(3);
+    const migratedGrant=(await target.sql<{current_revision:number;current_digest:Uint8Array;cose:Uint8Array;previous_digest:Uint8Array;
+      signing_public_key:string}[]>`SELECT lineage.current_revision,lineage.current_digest,revision.cose,revision.previous_digest,revision.signing_public_key
+      FROM grant_lineages lineage JOIN grant_revisions revision ON revision.grant_id=lineage.grant_id AND revision.revision=lineage.current_revision
+      WHERE lineage.grant_id=${grantId}`)[0]!;
+    expect(migratedGrant.current_revision).toBe(2);expect(migratedGrant.signing_public_key).toBe(offer.destination_identity_key);
+    expect(Buffer.from(migratedGrant.previous_digest)).toEqual(Buffer.from(grantDigest));
+    expect((await verifySignedPayload("hail.grant",migratedGrant.cose,
+      createWebCryptoVerifier(()=>ed25519PublicKeyFromDidKey(offer.destination_identity_key)))).payload).toMatchObject({revision:2,key_id:`${did}#hail-identity`});
+    expect(await target.sql`SELECT 1 FROM detached_bodies WHERE sender_account_id=${accountId} AND digest=${bodyHash}`).toHaveLength(1);
+    expect((await target.sql<{state:string}[]>`SELECT state FROM delivery_work WHERE sender_did=${grantee} AND message_id=${incomingId}`)[0]?.state).toBe("accepted");
+    expect(await target.sql`SELECT 1 FROM account_api_credentials WHERE account_id=${accountId}`).toHaveLength(0);
+    const receipt=await activation.issueReceipt(offer.transfer_id);
+    expect(await activation.issueReceipt(offer.transfer_id)).toEqual(receipt);
+    const retire=()=>withFreshServingGenerations(source.sql,()=>sourceApp.request(
+      `${sourceOrigin}/.well-known/hail/transfers/managed-retirements`,{method:"POST",
+        headers:{"Content-Type":TRANSFER_MEDIA_TYPE},body:Uint8Array.from(requestWire(receipt))}));
+    const retained=await retire();expect(retained.status).toBe(204);
+    // The first 204 may be lost; the exact receipt remains safe to replay.
+    expect((await retire()).status).toBe(204);
+    expect((await source.sql<{state:string}[]>`SELECT state FROM provider_migration_fences WHERE transfer_id=${offer.transfer_id}`)[0]?.state).toBe("retired");
+    expect(await source.sql`SELECT 1 FROM provider_retired_transfer_history WHERE transfer_id=${offer.transfer_id}`).toHaveLength(1);
+    const changedReceipt={...receipt,signature:Uint8Array.from(receipt.signature)};
+    changedReceipt.signature[0]=(changedReceipt.signature[0]??0)^1;
+    const changedRetirement=await withFreshServingGenerations(source.sql,()=>sourceApp.request(
+      `${sourceOrigin}/.well-known/hail/transfers/managed-retirements`,{method:"POST",
+        headers:{"Content-Type":TRANSFER_MEDIA_TYPE},body:Uint8Array.from(requestWire(changedReceipt))}));
+    expect(changedRetirement.status).toBe(400);
+    await withFreshServingGenerations(target.sql,()=>target.sql`UPDATE grant_publications SET state='acknowledged',
+      acknowledged_etag='"grant-v2"',acknowledged_at=clock_timestamp() WHERE grant_id=${grantId} AND revision=2`);
+    const returnNow=Math.floor(Date.now()/1000),returnGrantValue:ManagedTransferGrant={type:"hail.managed-transfer-grant",version:1,did,
+      nonce:randomUUID(),source_service_base:targetBase,destination_service_base:sourceBase,destination_domain:"a.example.com",
+      owner_recovery_key:owner.did(),source_identity_key:offer.destination_identity_key,issued_at:returnNow,expires_at:returnNow+3600};
+    const returnGrantBytes=encodeManagedHandshake(returnGrantValue),returnGrant={payloadBytes:returnGrantBytes,
+      signature:await owner.sign(managedHandshakeSignatureInput(returnGrantValue.type,returnGrantBytes))};
+    const currentMessaging=(await target.sql<{public_key:string;encrypted_private_key:Uint8Array;encryption_nonce:Uint8Array}[]>`
+      SELECT public_key,encrypted_private_key,encryption_nonce FROM account_keys WHERE account_id=${accountId} AND role='hail-messaging'`)[0]!;
+    const currentMessagingSecret=await targetEncryptor.decrypt(accountId,"hail-messaging","ed25519",currentMessaging.public_key,
+      {ciphertext:currentMessaging.encrypted_private_key,nonce:currentMessaging.encryption_nonce,encryptionVersion:1,kekId:"poc-v1"});
+    const returnAcknowledgementValue:ManagedTransferAcknowledgement={type:"hail.managed-transfer-acknowledgement",version:1,did,
+      nonce:returnGrantValue.nonce,source_service_base:targetBase,destination_service_base:sourceBase,
+      grant_digest:managedHandshakeDigest(returnGrant.payloadBytes),source_messaging_key:offer.destination_messaging_key,
+      issued_at:returnNow,expires_at:returnNow+3600};
+    let returnAcknowledgement;
+    try{returnAcknowledgement=await signManagedProviderHandshake(returnAcknowledgementValue,await importEd25519PrivateKey(currentMessagingSecret));}
+    finally{currentMessagingSecret.fill(0);}
+    const returnTarget=new PreparedMigrationTarget(source.sql,sourceEncryptor,sourceBase,true),returnReceiver=new ManagedTransferInvitationReceiver(
+      source.sql,resolver,returnTarget),returnOfferSigned=await returnReceiver.receive(returnGrant,returnAcknowledgement);
+    const returnOffer=await verifyManagedProviderHandshake(returnOfferSigned,"hail.managed-transfer-offer",
+      (decodeDeterministic(returnOfferSigned.payloadBytes) as Record<string,string>).destination_messaging_key!);
+    const returnSelectionValue:ManagedTransferAddressSelection={type:"hail.managed-transfer-address-selection",version:1,did,
+      nonce:returnGrantValue.nonce,transfer_id:returnOffer.transfer_id,grant_digest:managedHandshakeDigest(returnGrant.payloadBytes),
+      offer_digest:managedHandshakeDigest(returnOfferSigned.payloadBytes),address:"alice-return@a.example.com",selection_nonce:randomUUID(),
+      issued_at:returnNow,expires_at:returnNow+1800};
+    const returnSelectionBytes=encodeManagedHandshake(returnSelectionValue),returnSelection={payloadBytes:returnSelectionBytes,
+      signature:await owner.sign(managedHandshakeSignatureInput(returnSelectionValue.type,returnSelectionBytes))};
+    const returnedReservation=await new ManagedTransferAddressReservation(source.sql,resolver,returnTarget).reserve(returnSelection);
+    const returnKeys=returnedReservation.prepared,returnTransfer=returnOffer.transfer_id;
+    await target.sql`INSERT INTO provider_migration_fences(did,account_id,transfer_id,destination_service_base,
+      destination_rotation_public_key,destination_messaging_public_key,state,source_custody_profile,
+      owner_recovery_public_key,source_identity_public_key,destination_identity_public_key)
+      VALUES(${did},${accountId},${returnTransfer},${sourceBase},${returnKeys.rotationPublicKey},${returnKeys.messagingPublicKey},
+        'fenced','managed',${owner.did()},${offer.destination_identity_key},${returnKeys.identityPublicKey})`;
+    await source.sql`UPDATE transfer_address_reservations SET state='submitted' WHERE transfer_id=${returnTransfer}`;
+    const returnExport=await new ManagedMigrationExportService(target.sql,new OnboardingRepository(target.sql),targetEncryptor,resolver,targetBase)
+      .exportFenced({did,accountId,transferId:returnTransfer,destinationServiceBase:sourceBase,ownerRecoveryPublicKey:owner.did(),
+        sourceIdentityPublicKey:offer.destination_identity_key,destinationIdentityPublicKey:returnKeys.identityPublicKey!,
+        destinationRotationPublicKey:returnKeys.rotationPublicKey,destinationMessagingPublicKey:returnKeys.messagingPublicKey,state:"fenced"});
+    const returnManifest=validateManagedTransferManifest(returnExport.bytes);
+    expect(returnManifest.sourceGeneration).toBe(2);
+    await expect(validateManagedReturningEvidence(source.sql,returnManifest)).resolves.toMatchObject({account_id:accountId,generation:"1"});
+    const changedHistory=structuredClone(returnManifest);
+    changedHistory.tables.grant_revisions[0]!.cose=`\\x${"00".repeat(64)}`;
+    await expect(validateManagedReturningEvidence(source.sql,changedHistory)).rejects.toThrow(/loses or conflicts/);
+    await expect(source.sql.begin(async tx=>{
+      expect(await replaceRetiredManagedProjection(tx,returnManifest)).toBe(3);
+      expect(Number((await tx<{generation:string|number}[]>`SELECT generation FROM account_serving_generations WHERE account_id=${accountId}`)[0]?.generation)).toBe(3);
+      throw new Error("rollback return rehearsal");
+    })).rejects.toThrow("rollback return rehearsal");
+    expect(Number((await source.sql<{generation:string|number}[]>`SELECT generation FROM account_serving_generations WHERE account_id=${accountId}`)[0]?.generation)).toBe(1);
+    const returnCutover=await signOperation({type:"plc_operation",prev:cutoverCid,
+      rotationKeys:[owner.did(),returnKeys.rotationPublicKey],verificationMethods:{...destinationState.verificationMethods,
+        "hail-identity":returnKeys.identityPublicKey!,"hail-messaging":returnKeys.messagingPublicKey},
+      alsoKnownAs:destinationState.alsoKnownAs,services:{...destinationState.services,
+        hail:{type:"HailMessaging",endpoint:sourceBase}}},owner);
+    const returnCutoverBytes=new TextEncoder().encode(JSON.stringify(returnCutover)),returnCid=(await cidForCbor(returnCutover)).toString();
+    const returnApprovalValue:ManagedTransferApproval={type:"hail.managed-transfer-approval",version:1,did,nonce:returnGrantValue.nonce,
+      transfer_id:returnTransfer,source_service_base:targetBase,destination_service_base:sourceBase,
+      destination_address:returnSelectionValue.address,owner_recovery_key:owner.did(),source_identity_key:offer.destination_identity_key,
+      destination_rotation_key:returnKeys.rotationPublicKey,destination_identity_key:returnKeys.identityPublicKey!,
+      destination_messaging_key:returnKeys.messagingPublicKey,grant_digest:managedHandshakeDigest(returnGrant.payloadBytes),
+      offer_digest:managedHandshakeDigest(returnOfferSigned.payloadBytes),selection_digest:managedHandshakeDigest(returnSelection.payloadBytes),
+      snapshot_version:4,snapshot_digest:returnExport.digest,history_checkpoint_digest:decodeBase64Url(returnManifest.historyCheckpointDigest),
+      source_generation:2,previous_operation_cid:cutoverCid,operation_cid:returnCid,issued_at:returnNow,expires_at:returnNow+900};
+    const returnApprovalBytes=encodeManagedHandshake(returnApprovalValue),returnApproval={payloadBytes:returnApprovalBytes,
+      signature:await owner.sign(managedHandshakeSignatureInput(returnApprovalValue.type,returnApprovalBytes))};
+    const returnStager=new ManagedMigrationStageService(source.sql,resolver,returnTarget,sourceBase,()=>returnNow);
+    expect(await returnStager.stage(returnExport,returnApproval,returnCutoverBytes)).toEqual(returnManifest);
+    await expect(new ManagedMigrationPlcSubmission(source.sql,plc,resolver,sourceBase).submit(returnTransfer)).resolves.toBe(returnCid);
+    const returnState=(await validateOperationLog(did,plcLog))!,returnVerifiedAt=new Date().toISOString(),returnBundle=encodeDeterministic({
+      type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",did,operation_cid:returnCid,verified_at:returnVerifiedAt,
+      witnesses:[{state:returnState},{state:returnState}]} as unknown as HailValue),
+      returnEvidenceDigest=new Uint8Array(createHash("sha256").update(returnBundle).digest());
+    await source.sql`INSERT INTO public_plc_resolution_evidence(evidence_digest,did,operation_cid,verified_at,bundle_bytes)
+      VALUES(${returnEvidenceDigest},${did},${returnCid},${returnVerifiedAt},${returnBundle})`;
+    const returnResolver={async resolve(value:string){const result=await resolver.resolve(value);return {...result,evidence:{...result.evidence,
+      verification:{profile:"strict-public-v1" as const,digest:encodeBase64Url(returnEvidenceDigest),operationCid:returnCid,verifiedAt:returnVerifiedAt}}};}};
+    const returnStaged=(await source.sql<{destination_binding_cose:Uint8Array;destination_binding_digest:Uint8Array}[]>`
+      SELECT destination_binding_cose,destination_binding_digest FROM pending_migration_imports WHERE transfer_id=${returnTransfer}`)[0]!;
+    const returnBinding=decodeDeterministic((await verifySignedPayload("hail.address-binding",returnStaged.destination_binding_cose,
+      createWebCryptoVerifier(()=>ed25519PublicKeyFromDidKey(returnKeys.identityPublicKey!)))).payloadBytes) as any;
+    const returnVerifier={async verify(address:string){return {address,did,serviceBase:sourceBase,identityDidKey:returnKeys.identityPublicKey!,
+      messagingDidKey:returnKeys.messagingPublicKey,plcEvidence:(await returnResolver.resolve(did)).evidence,verifiedAt:new Date(),
+      binding:returnBinding,representation:returnStaged.destination_binding_cose,digest:returnStaged.destination_binding_digest};}};
+    const returnActivation=new ManagedMigrationActivation(source.sql,sourceEncryptor,returnResolver,returnVerifier,sourceBase,"http://plc.fixture:2582");
+    expect(await withFreshServingGenerations(source.sql,()=>returnActivation.activate(returnTransfer))).toEqual({did,accountId,generation:3});
+    expect(await withFreshServingGenerations(source.sql,()=>returnActivation.activate(returnTransfer))).toEqual({did,accountId,generation:3});
+    expect(Number((await source.sql<{generation:string|number}[]>`SELECT generation FROM account_serving_generations WHERE account_id=${accountId}`)[0]?.generation)).toBe(3);
+    expect((await source.sql<{canonical_address:string}[]>`SELECT canonical_address FROM provider_accounts WHERE id=${accountId}`)[0]?.canonical_address)
+      .toBe("alice-return@a.example.com");
+    expect(await source.sql`SELECT 1 FROM account_keys WHERE account_id=${accountId} AND public_key IN
+      (${returnKeys.rotationPublicKey},${returnKeys.identityPublicKey!},${returnKeys.messagingPublicKey})`).toHaveLength(3);
+    const returnedGrant=(await source.sql<{current_revision:number;signing_public_key:string;previous_digest:Uint8Array}[]>`
+      SELECT lineage.current_revision,revision.signing_public_key,revision.previous_digest FROM grant_lineages lineage
+      JOIN grant_revisions revision ON revision.grant_id=lineage.grant_id AND revision.revision=lineage.current_revision
+      WHERE lineage.grant_id=${grantId}`)[0]!;
+    expect(returnedGrant.current_revision).toBe(3);expect(returnedGrant.signing_public_key).toBe(returnKeys.identityPublicKey);
+    expect(Buffer.from(returnedGrant.previous_digest)).toEqual(Buffer.from(migratedGrant.current_digest));
+    const returnedTerminal=(await source.sql<{current_revision:number;current_status:string;cose:Uint8Array;current_digest:Uint8Array}[]>`
+      SELECT lineage.current_revision,lineage.current_status,revision.cose,lineage.current_digest FROM grant_lineages lineage
+      JOIN grant_revisions revision ON revision.grant_id=lineage.grant_id AND revision.revision=lineage.current_revision
+      WHERE lineage.grant_id=${terminalGrantId}`)[0]!;
+    expect(returnedTerminal.current_revision).toBe(1);expect(returnedTerminal.current_status).toBe("revoked");
+    expect(Buffer.from(returnedTerminal.cose)).toEqual(Buffer.from(terminalGrantCose));
+    expect(Buffer.from(returnedTerminal.current_digest)).toEqual(Buffer.from(terminalGrantDigest));
+    expect((await source.sql<{revoked_at:Date|null}[]>`SELECT revoked_at FROM account_api_credentials WHERE account_id=${accountId}`)
+      .every(row=>row.revoked_at instanceof Date)).toBe(true);
+    await expect(withServingGeneration(accountId,1,()=>source.sql`UPDATE provider_accounts SET updated_at=clock_timestamp() WHERE id=${accountId}`))
+      .rejects.toThrow(/stale/);
+    const returnReceipt=await returnActivation.issueReceipt(returnTransfer);
+    const targetFence=new ManagedMigrationFenceService(target.sql,resolver,targetBase);
+    await targetFence.retire(did,returnTransfer,returnReceipt);await targetFence.retire(did,returnTransfer,returnReceipt);
+    const archivedImport=(await target.sql<{prepared:string}[]>`SELECT prepared_public_record::text AS prepared
+      FROM provider_retired_import_history WHERE transfer_id=${offer.transfer_id}`)[0]?.prepared??"";
+    expect(archivedImport).not.toContain("private_ciphertext");expect(archivedImport).not.toContain("identity_nonce");
+    const rollback49=await target.sql.reserve();try {
+      await expect(rollback49.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql",import.meta.url)).text()))
+        .rejects.toThrow("active imports exist");
+    } finally {await rollback49.unsafe("ROLLBACK");rollback49.release();}
   } finally {await source.close();await target.close();await admin.unsafe(`DROP SCHEMA "${sourceSchema}" CASCADE`);
     await admin.unsafe(`DROP SCHEMA "${targetSchema}" CASCADE`);await admin.close();}
 },45_000);

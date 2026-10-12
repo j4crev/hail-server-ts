@@ -63,6 +63,19 @@ export function registerManagedTransferRoutes(app:Hono,receiver?:ManagedTransfer
       return new Response(null,{status:204,headers:{"Cache-Control":"no-store"}});
     } catch {return new Response(null,{status:400,headers:{"Cache-Control":"no-store"}});}
   });
+  if(fence)app.post("/.well-known/hail/transfers/managed-retirements",async context=>{
+    if(rateLimit&&!await rateLimit.admit("request"))return new Response(null,{status:429});
+    if(context.req.header("Content-Type")!==TRANSFER_MEDIA_TYPE||context.req.header("Content-Encoding")!==undefined)
+      return new Response(null,{status:415});
+    try {
+      const signed=parseRequestWire(await boundedTransferBody(context.req.raw.body,context.req.header("Content-Length")??null));
+      const receipt=decodeDeterministic(signed.payloadBytes) as {did:string;transfer_id:string};
+      if(typeof receipt.did!=="string"||!/^did:plc:[a-z2-7]{24}$/.test(receipt.did)||typeof receipt.transfer_id!=="string"||
+        !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(receipt.transfer_id))throw new Error("Invalid retirement receipt subject");
+      await fence.retire(receipt.did,receipt.transfer_id,signed);
+      return new Response(null,{status:204,headers:{"Cache-Control":"no-store"}});
+    } catch {return new Response(null,{status:400,headers:{"Cache-Control":"no-store"}});}
+  });
 }
 
 export function registerTransferRoutes(app: Hono, receiver: TransferInvitationReceiver,

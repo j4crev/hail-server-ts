@@ -2,6 +2,8 @@ import { def } from "@did-plc/lib";
 import { decodeDeterministic } from "@hailproto/codec";
 import type { SQL } from "bun";
 import type { HailDidResolver } from "../plc/resolver.js";
+import type { SignedActivationReceipt } from "./activation-receipt.js";
+import { MigrationFenceService } from "./fence.js";
 import { managedHandshakeDigest, verifyManagedOwnerHandshake, verifyManagedProviderHandshake,
   type SignedManagedHandshake } from "./managed-handshake.js";
 
@@ -225,5 +227,10 @@ export class ManagedMigrationFenceService {
       same(row.final_request_bytes, request.payloadBytes) && same(row.final_request_signature, request.signature) &&
       same(row.selection_bytes, selection.payloadBytes) && same(row.selection_signature, selection.signature) &&
       same(row.reservation_bytes, reservation.payloadBytes) && same(row.reservation_signature, reservation.signature);
+  }
+
+  async retire(did:string,transferId:string,signed:SignedActivationReceipt):Promise<void> {
+    await new MigrationFenceService(this.sql,this.resolver,this.sourceServiceBase,
+      ()=>new Date(this.now()*1000)).retire(did,transferId,signed);
   }
 }

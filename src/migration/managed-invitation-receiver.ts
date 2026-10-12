@@ -27,7 +27,7 @@ export class ManagedTransferInvitationReceiver {
     const acknowledgementDigest=managedHandshakeDigest(acknowledgementSigned.payloadBytes);
     return this.sql.begin(async tx=>{
       await tx`SELECT pg_advisory_xact_lock(684245103,hashtext(${did}))`;
-      await this.target.recycleRetiredSlots(tx,did);
+      await this.target.recycleRetiredSlots(tx,did,"managed");
       const cancelled=await tx`SELECT 1 FROM cancelled_transfer_sessions WHERE did=${did} AND nonce=${decoded.nonce}`;
       if(cancelled.length)throw new Error("This managed transfer session was cancelled by the source");
       const row=(await tx<ReceivedManaged[]>`SELECT received.nonce,received.grant_digest,received.invitation_digest,

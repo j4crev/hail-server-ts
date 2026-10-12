@@ -6,7 +6,7 @@ import type { SQL } from "bun";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
 import { generateAccountIdentityKey, importEd25519PrivateKey } from "../identity/keys.js";
-import {retiredReturnAccount,clearRetiredImportSlots} from "./return.js";
+import {retiredReturnAccount,retiredManagedReturnAccount,clearRetiredImportSlots} from "./return.js";
 import type { HailDidResolver } from "../plc/resolver.js";
 import { handshakeDigest, sameDigest, signHandshake, verifyHandshake,
   type SignedHandshake, type TransferRequest, type TransferGrant, type TransferInvitation,
@@ -53,14 +53,16 @@ export class PreparedMigrationTarget {
     private readonly allowReturns=false,
   ) {}
 
-  async recycleRetiredSlots(tx:SQL,did:string) {
-    if(this.allowReturns){const retired=await retiredReturnAccount(tx,did);if(retired)await clearRetiredImportSlots(tx,retired.account_id);}
+  async recycleRetiredSlots(tx:SQL,did:string,custodyProfile:"portable"|"managed"="portable") {
+    if(this.allowReturns){const retired=custodyProfile==="managed"?await retiredManagedReturnAccount(tx,did):await retiredReturnAccount(tx,did);
+      if(retired)await clearRetiredImportSlots(tx,retired.account_id);}
   }
 
   async prepare(did: string,custodyProfile:"portable"|"managed"="portable"): Promise<PreparedTargetKeys> {
     if (!/^did:plc:[a-z2-7]{24}$/.test(did)) throw new Error("Target DID is not canonical");
     const existing = await this.sql<{ id: string }[]>`SELECT id FROM provider_accounts WHERE did = ${did}`;
-    if (existing.length&&(!this.allowReturns||!await retiredReturnAccount(this.sql,did))) throw new Error("Target already serves this DID");
+    if (existing.length&&(!this.allowReturns||!(custodyProfile==="managed"?
+      await retiredManagedReturnAccount(this.sql,did):await retiredReturnAccount(this.sql,did)))) throw new Error("Target already serves this DID");
     const transferId = randomUUID();
     const rotation = await P256Keypair.create({ exportable: true });
     const messaging = (await crypto.subtle.generateKey("Ed25519", true, ["sign", "verify"])) as CryptoKeyPair;
