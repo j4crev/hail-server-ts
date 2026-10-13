@@ -18,7 +18,7 @@ export async function retainPublicSigningAuthority(
     evidence: PlcResolutionEvidence;
   },
 ): Promise<void> {
-  if (!input.evidence.verification) return;
+  if (input.evidence.verification?.profile !== "strict-public-v1") return;
   const now = (await sql<{ instant: Date }[]>`SELECT clock_timestamp() AS instant`)[0]!.instant;
   const evidenceDigest = await requireFreshPublicAuthority(sql, input.evidence, input, now);
   const representationDigest = new Uint8Array(createHash("sha256").update(input.representation).digest());

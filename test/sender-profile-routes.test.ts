@@ -41,6 +41,7 @@ const config: AppConfig = {
   plcDirectoryUrl: "http://localhost:2582",
   databaseUrl: "postgresql://hail:secret@localhost/hail",
   keyEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  pocManagedTransfer: false,
 };
 const app = createApp(config, {
   async checkReadiness() {

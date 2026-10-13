@@ -3,6 +3,8 @@ import type {SQL} from "bun";
 import type {ManagedTransferAuthorization} from "../migration/managed-authorization.js";
 import type {ManagedTransferDelivery} from "../migration/managed-delivery.js";
 import type {SignedManagedHandshake} from "../migration/managed-handshake.js";
+import type {ManagedMigrationFenceService} from "../migration/managed-fence.js";
+import {validateManagedTransferManifest,type ManagedMigrationExportService} from "../migration/managed-snapshot.js";
 import {parseRequestWire} from "../migration/wire.js";
 import type {AccountApiSession} from "./repository.js";
 import {AccountTransferError} from "./transfer.js";
@@ -11,9 +13,11 @@ const wire=(signed:SignedManagedHandshake)=>({payload:encodeBase64Url(signed.pay
 
 export class ManagedAccountTransfer {
   constructor(private readonly sql:SQL,private readonly authorization:Pick<ManagedTransferAuthorization,"authorize">,
-    private readonly delivery:Pick<ManagedTransferDelivery,"deliver">,private readonly provider:string) {}
+    private readonly delivery:Pick<ManagedTransferDelivery,"deliver">,private readonly provider:string,
+    private readonly exports?:{fence:Pick<ManagedMigrationFenceService,"get">;
+      snapshots:Pick<ManagedMigrationExportService,"exportFenced">}) {}
 
-  private async writer(session:AccountApiSession) {
+  private async owner(session:AccountApiSession) {
     const rows=await this.sql`SELECT account.id FROM provider_accounts account
       JOIN managed_custody_evidence managed ON managed.account_id=account.id
       JOIN account_api_credentials credential ON credential.account_id=account.id AND credential.id=${session.credential_id}
@@ -23,6 +27,9 @@ export class ManagedAccountTransfer {
         AND EXISTS (SELECT 1 FROM account_keys held WHERE held.account_id=account.id AND held.role='hail-identity'
           AND held.public_key=managed.provider_identity_public_key)`;
     if(!rows.length)throw new AccountTransferError(403,"Managed transfer requires current provider-custody authority");
+  }
+  private async writer(session:AccountApiSession) {
+    await this.owner(session);
     if((await this.sql`SELECT 1 FROM provider_migration_fences WHERE account_id=${session.account_id}`).length)
       throw new AccountTransferError(409,"A managed source fence cannot start another transfer handshake");
   }
@@ -68,5 +75,21 @@ export class ManagedAccountTransfer {
       phase:expired?row.origin_confirmed_at?"expired-unresolved":"expired":row.origin_confirmed_at?"offer-ready":"acknowledgement-retained",
       destinationServiceBase:row.destination_service_base,expiresAt:row.expires_at.toISOString(),originConfirmed:!!row.origin_confirmed_at,
       transferId:row.consumed_transfer_id??transferId??null,acknowledgement:wire(acknowledgement),offer:offer?wire(offer):null};
+  }
+
+  async exportSnapshot(session:AccountApiSession,input:Record<string,unknown>) {
+    await this.owner(session);
+    if(Object.keys(input).length!==1||typeof input.transferId!=="string"||
+      !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(input.transferId))
+      throw new AccountTransferError(400,"Managed export requires the exact transfer ID");
+    if(!this.exports)throw new AccountTransferError(409,"Managed snapshot export is not enabled");
+    const fence=await this.exports.fence.get(session.did);
+    if(!fence||fence.accountId!==session.account_id||fence.transferId!==input.transferId||
+      !["fenced","exported"].includes(fence.state))throw new AccountTransferError(409,"Matching managed source fence was not found");
+    const snapshot=await this.exports.snapshots.exportFenced(fence);
+    validateManagedTransferManifest(snapshot.bytes);
+    return {type:"hail.managed-migration-transfer",version:4,manifest:encodeBase64Url(snapshot.bytes),
+      digest:encodeBase64Url(snapshot.digest),signature:encodeBase64Url(snapshot.signature),
+      sourceMessagingPublicKey:snapshot.sourceMessagingPublicKey};
   }
 }

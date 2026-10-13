@@ -41,6 +41,7 @@ import type { ManagedTransferAddressReservation } from "./migration/managed-addr
 import type { ManagedTransferFencePublisher } from "./migration/managed-fence-publisher.js";
 import type { ManagedMigrationFenceService } from "./migration/managed-fence.js";
 import type { ManagedAccountTransfer } from "./accounts/managed-transfer.js";
+import type {ManagedMigrationCompletion} from "./migration/managed-completion.js";
 import {withFreshServingGenerations} from "./db/serving.js";
 
 export interface ReadinessResult {
@@ -69,6 +70,7 @@ export interface AppDependencies {
   managedTransferAddressReservation?:ManagedTransferAddressReservation;
   managedTransferFencePublisher?:ManagedTransferFencePublisher;
   managedMigrationFence?:ManagedMigrationFenceService;
+  managedMigrationCompletion?:ManagedMigrationCompletion;
   accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging;
     binding?:AccountBinding;transfer?:AccountTransfer;custodyTransition?:SameProviderCustodyTransition;managedTransfer?:ManagedAccountTransfer };
   selfServiceOnboarding?: SelfServiceOnboarding;
@@ -119,7 +121,7 @@ export function createApp(
     dependencies.managedTransferFencePublisher||dependencies.managedMigrationFence)registerManagedTransferRoutes(app,
     dependencies.managedTransferInvitationReceiver,dependencies.transferRateLimit,
     dependencies.managedTransferAddressReservation,dependencies.managedTransferFencePublisher,
-    dependencies.managedMigrationFence);
+    dependencies.managedMigrationFence,dependencies.managedMigrationCompletion);
 
   app.get("/health/live", (context) =>
     context.json({

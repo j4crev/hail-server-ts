@@ -328,6 +328,13 @@ refuses rollback after generation 2 or detachment; application downgrade after
 advancement is not supported. See
 [return proof and boundaries](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/generation-bound-return.md).
 
+`POC_MANAGED_TRANSFER=true` additionally enables the managed-custody invitation,
+fence, export, configured-private-PLC completion, activation and retirement path.
+It is disabled by default and requires `POC_ACCOUNT_ACCESS`,
+`POC_SELF_SERVICE_TRANSFER` and `POC_SELF_SERVICE_RETURN` on a non-public PLC.
+Its reads are retained as `poc-local`; this flag cannot enable public-PLC or
+strict-public operation.
+
 ### Never-active post-export recovery (internal migration 39)
 
 `PrivatePocTransferAbandonment` implements independent owner-recovery approvals,

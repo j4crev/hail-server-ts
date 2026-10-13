@@ -38,7 +38,7 @@ interface PreparedRow {
 export class ManagedMigrationActivation {
   constructor(private readonly sql:SQL,private readonly encryptor:KeyEncryptor,private readonly resolver:HailDidResolver,
     private readonly verifier:AddressVerificationService,private readonly serviceBase:string,private readonly registryOrigin:string,
-    private readonly now=()=>new Date()) {}
+    private readonly verificationMode:"strict-public-v1"|"poc-local"="strict-public-v1",private readonly now=()=>new Date()) {}
 
   async issueReceipt(transferId:string):Promise<SignedActivationReceipt> {
     const row=(await this.sql<{state:string;did:string;manifest_bytes:Uint8Array;manifest_digest:Uint8Array;
@@ -169,7 +169,7 @@ export class ManagedMigrationActivation {
       ] as const)await tx`INSERT INTO account_keys(account_id,role,algorithm,public_key,encrypted_private_key,encryption_nonce,encryption_version,kek_id)
         VALUES(${manifest.accountId},${role},${algorithm},${publicKey},${material.ciphertext},${material.nonce},1,'poc-v1')`;
       await tx`INSERT INTO managed_custody_evidence(account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode)
-        VALUES(${manifest.accountId},${manifest.ownerRecoveryPublicKey},${manifest.destinationIdentityPublicKey},'strict-public-v1')`;
+        VALUES(${manifest.accountId},${manifest.ownerRecoveryPublicKey},${manifest.destinationIdentityPublicKey},${this.verificationMode})`;
       for(const row of manifest.tables.public_plc_resolution_evidence)await insertImmutable(tx,"public_plc_resolution_evidence",row);
       for(const table of ["plc_operation_evidence","address_bindings","sender_profiles"] as const)
         for(const row of manifest.tables[table])await insert(tx,table,table==="address_bindings"?{...row,selected_at:null}:row);
@@ -208,7 +208,7 @@ export class ManagedMigrationActivation {
   private async confirmCurrent(manifest:ManagedTransferManifest,operationBytes:Uint8Array) {
     const operation=def.operation.parse(parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(operationBytes)));
     const cid=(await cidForCbor(operation)).toString(),resolved=await this.resolver.resolve(manifest.did);
-    if(!resolved.evidence.verification||resolved.evidence.verification.operationCid!==cid||resolved.did!==manifest.did||
+    if(resolved.evidence.verification?.profile!==this.verificationMode||resolved.evidence.verification.operationCid!==cid||resolved.did!==manifest.did||
       resolved.serviceBase!==this.serviceBase||resolved.identityDidKey!==manifest.destinationIdentityPublicKey||
       resolved.messagingDidKey!==manifest.destinationMessagingPublicKey)
       throw new Error("Independent readers do not confirm the materialized managed destination");

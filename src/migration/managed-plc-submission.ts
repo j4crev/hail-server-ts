@@ -24,8 +24,8 @@ export class ManagedMigrationPlcSubmission {
         SELECT did,state,custody_profile,manifest_bytes,signed_plc_operation_bytes,user_consent_payload,
           user_consent_signature,owner_recovery_public_key,destination_identity_public_key
         FROM pending_migration_imports WHERE transfer_id=${transferId} FOR UPDATE`)[0];
-      if(!row||row.state!=="staged"||row.custody_profile!=="managed")
-        throw new Error("Managed PLC write requires an inactive staged import");
+      if(!row||!["staged","active"].includes(row.state)||row.custody_profile!=="managed")
+        throw new Error("Managed PLC write requires the retained staged or active import");
       const manifest=validateManagedTransferManifest(row.manifest_bytes);
       if(manifest.transferId!==transferId||manifest.did!==row.did||manifest.destinationServiceBase!==this.destinationServiceBase||
         manifest.ownerRecoveryPublicKey!==row.owner_recovery_public_key||

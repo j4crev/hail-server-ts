@@ -13,6 +13,7 @@ export interface AppConfig {
   databaseUrl: string;
   keyEncryptionKey: string;
   publicPlcAuthority?: PublicPlcAuthorityConfig;
+  pocManagedTransfer: boolean;
 }
 
 type Environment = Record<string, string | undefined>;
@@ -119,6 +120,14 @@ export function loadConfig(environment: Environment = Bun.env): AppConfig {
   }
 
   const publicPlcAuthority = publicPlcAuthorityConfig(environment, plcDirectoryUrl, publicOrigin);
+  const managedGate=environment.POC_MANAGED_TRANSFER?.trim();
+  if(managedGate!==undefined&&managedGate!=="true"&&managedGate!=="false")throw new Error("POC_MANAGED_TRANSFER must be true or false");
+  const pocManagedTransfer=managedGate==="true";
+  if(pocManagedTransfer&&(plcDirectoryUrl==="https://plc.directory"||publicPlcAuthority||
+    environment.POC_ACCOUNT_ACCESS!=="true"||environment.POC_SELF_SERVICE_TRANSFER!=="true"||
+    environment.POC_SELF_SERVICE_RETURN!=="true")) {
+    throw new Error("Private-PLC managed transfer requires account access, transfer/return gates, and a non-public PLC profile");
+  }
   return {
     nodeEnv,
     port,
@@ -128,6 +137,7 @@ export function loadConfig(environment: Environment = Bun.env): AppConfig {
     plcDirectoryUrl,
     databaseUrl,
     keyEncryptionKey,
+    pocManagedTransfer,
     ...(publicPlcAuthority ? { publicPlcAuthority } : {}),
   };
 }

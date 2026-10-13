@@ -29,7 +29,8 @@ interface DestinationRow {
 export class ManagedMigrationStageService {
   constructor(private readonly sql: SQL, private readonly resolver: HailDidResolver,
     private readonly target: PreparedMigrationTarget, private readonly destinationServiceBase: string,
-    private readonly now = () => Math.floor(Date.now() / 1000)) {}
+    private readonly now = () => Math.floor(Date.now() / 1000),
+    private readonly verificationMode:"strict-public-v1"|"poc-local"="strict-public-v1") {}
 
   async stage(snapshot: SignedManagedTransferSnapshot, approvalSigned: SignedManagedHandshake,
     operationBytes: Uint8Array): Promise<ReturnType<typeof validateManagedTransferManifest>> {
@@ -38,6 +39,22 @@ export class ManagedMigrationStageService {
       throw new Error("Managed snapshot digest or signature is invalid");
     }
     const manifest = validateManagedTransferManifest(snapshot.bytes);
+    if(manifest.tables.managed_custody_evidence[0]?.verification_mode!==this.verificationMode)
+      throw new Error("Managed snapshot authority profile is not enabled here");
+    const retained=(await this.sql<{manifest_bytes:Uint8Array;manifest_digest:Uint8Array;signature:Uint8Array;
+      source_messaging_public_key:string;user_consent_payload:Uint8Array;user_consent_signature:Uint8Array;
+      signed_plc_operation_bytes:Uint8Array;state:string;custody_profile:string}[]>`
+      SELECT manifest_bytes,manifest_digest,signature,source_messaging_public_key,user_consent_payload,
+        user_consent_signature,signed_plc_operation_bytes,state,custody_profile FROM pending_migration_imports
+      WHERE transfer_id=${manifest.transferId}`)[0];
+    if(retained) {
+      if(!["staged","active"].includes(retained.state)||retained.custody_profile!=="managed"||
+        !same(retained.manifest_bytes,snapshot.bytes)||!same(retained.manifest_digest,snapshotDigest)||
+        !same(retained.signature,snapshot.signature)||retained.source_messaging_public_key!==snapshot.sourceMessagingPublicKey||
+        !same(retained.user_consent_payload,approvalSigned.payloadBytes)||!same(retained.user_consent_signature,approvalSigned.signature)||
+        !same(retained.signed_plc_operation_bytes,operationBytes))throw new Error("Managed migration retry changed retained exact artifacts");
+      return manifest;
+    }
     if (manifest.destinationServiceBase !== this.destinationServiceBase) {
       throw new Error("Managed snapshot names another destination");
     }
@@ -45,7 +62,7 @@ export class ManagedMigrationStageService {
       snapshot.sourceMessagingPublicKey) throw new Error("Managed snapshot signer differs from its retained messaging role");
     const resolved = await this.resolver.resolve(manifest.did);
     const plc = def.documentData.parse(resolved.evidence.data);
-    if (!resolved.evidence.verification || resolved.did !== manifest.did ||
+    if (resolved.evidence.verification?.profile !== this.verificationMode || resolved.did !== manifest.did ||
       resolved.serviceBase !== manifest.sourceServiceBase || resolved.identityDidKey !== manifest.sourceIdentityPublicKey ||
       plc.rotationKeys[0] !== manifest.ownerRecoveryPublicKey ||
       resolved.messagingDidKey !== snapshot.sourceMessagingPublicKey ||

@@ -107,7 +107,8 @@ export async function retiredManagedReturnAccount(sql:SQL,did:string) {
     LEFT JOIN provider_transfer_authorizations auth ON auth.did=f.did AND auth.consumed_transfer_id=f.transfer_id
     WHERE f.did=${did} AND f.state='retired' AND h.fence_record=to_jsonb(f) AND h.export_record=to_jsonb(e)
       AND h.authorization_record IS NOT DISTINCT FROM to_jsonb(auth)
-      AND EXISTS (SELECT 1 FROM managed_custody_evidence WHERE account_id=a.id AND verification_mode='strict-public-v1')
+      AND EXISTS (SELECT 1 FROM managed_custody_evidence WHERE account_id=a.id
+        AND verification_mode IN ('strict-public-v1','poc-local'))
       AND NOT EXISTS (SELECT 1 FROM portable_custody_evidence WHERE account_id=a.id)`)[0]??null;
 }
 

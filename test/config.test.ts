@@ -48,7 +48,17 @@ describe("loadConfig", () => {
       publicOrigin: "https://hailproto.app",
       hailServiceBase: "https://hailproto.app/hail",
       plcDirectoryUrl: "http://localhost:2582",
+      pocManagedTransfer:false,
     });
+  });
+
+  it("enables private managed transfer only with its existing private gates",()=>{
+    const enabled={...validEnvironment,POC_MANAGED_TRANSFER:"true",POC_ACCOUNT_ACCESS:"true",
+      POC_SELF_SERVICE_TRANSFER:"true",POC_SELF_SERVICE_RETURN:"true"};
+    expect(loadConfig(enabled).pocManagedTransfer).toBe(true);
+    expect(()=>loadConfig({...enabled,POC_SELF_SERVICE_RETURN:"false"})).toThrow(/requires account access/);
+    expect(()=>loadConfig({...publicEnvironment,POC_MANAGED_TRANSFER:"true",POC_ACCOUNT_ACCESS:"true",
+      POC_SELF_SERVICE_TRANSFER:"true",POC_SELF_SERVICE_RETURN:"true"})).toThrow(/non-public PLC/);
   });
 
   it("requires the Hail service base to belong to the public origin", () => {

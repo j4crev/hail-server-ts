@@ -161,7 +161,7 @@ export function validateManagedTransferManifest(bytes: Uint8Array): ManagedTrans
   if (custody.length !== 1 || custody[0]?.account_id !== manifest.accountId ||
     custody[0]?.owner_recovery_public_key !== manifest.ownerRecoveryPublicKey ||
     custody[0]?.provider_identity_public_key !== manifest.sourceIdentityPublicKey ||
-    custody[0]?.verification_mode !== "strict-public-v1") throw new Error("Managed custody evidence is incomplete");
+    !["strict-public-v1","poc-local"].includes(String(custody[0]?.verification_mode))) throw new Error("Managed custody evidence is incomplete");
   for (const table of ["plc_operation_evidence", "address_bindings", "sender_profiles"] as const) {
     if (manifest.tables[table].some((row) => row.account_id !== manifest.accountId)) {
       throw new Error(`Managed transfer ${table} contains another account`);
@@ -349,12 +349,13 @@ export function validateManagedTransferManifest(bytes: Uint8Array): ManagedTrans
 export class ManagedMigrationExportService {
   constructor(private readonly sql: SQL, private readonly accounts: Pick<OnboardingRepository, "getKey">,
     private readonly encryptor: KeyEncryptor, private readonly resolver: HailDidResolver,
-    private readonly serviceBase: string, private readonly now = () => new Date()) {}
+    private readonly serviceBase: string, private readonly now = () => new Date(),
+    private readonly verificationMode:"strict-public-v1"|"poc-local"="strict-public-v1") {}
 
   async exportFenced(fence: ManagedMigrationFence): Promise<SignedManagedTransferSnapshot> {
     const resolved = await this.resolver.resolve(fence.did);
     const plc = def.documentData.parse(resolved.evidence.data);
-    if (!resolved.evidence.verification || resolved.did !== fence.did || resolved.serviceBase !== this.serviceBase ||
+    if (resolved.evidence.verification?.profile !== this.verificationMode || resolved.did !== fence.did || resolved.serviceBase !== this.serviceBase ||
       resolved.identityDidKey !== fence.sourceIdentityPublicKey || plc.rotationKeys[0] !== fence.ownerRecoveryPublicKey) {
       throw new Error("Current strict PLC state does not authenticate the managed export source");
     }

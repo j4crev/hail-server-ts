@@ -12,6 +12,7 @@ import type { ManagedTransferInvitationReceiver } from "./managed-invitation-rec
 import type { ManagedTransferAddressReservation } from "./managed-address-selection.js";
 import type { ManagedTransferFencePublisher } from "./managed-fence-publisher.js";
 import type { ManagedMigrationFenceService } from "./managed-fence.js";
+import type {ManagedMigrationCompletion} from "./managed-completion.js";
 import { decodeDeterministic } from "@hailproto/codec";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { boundedTransferBody, parseInvitationWire, parseFinalRequestWire,
@@ -21,7 +22,8 @@ import { parseManagedInvitationWire } from "./wire.js";
 
 export function registerManagedTransferRoutes(app:Hono,receiver?:ManagedTransferInvitationReceiver,
   rateLimit?:TransferRateLimit,reservations?:ManagedTransferAddressReservation,
-  publisher?:Pick<ManagedTransferFencePublisher,"publish">,fence?:ManagedMigrationFenceService):void {
+  publisher?:Pick<ManagedTransferFencePublisher,"publish">,fence?:ManagedMigrationFenceService,
+  completion?:ManagedMigrationCompletion):void {
   if(receiver)app.post("/.well-known/hail/transfers/managed-invitations",async context=>{
     if(rateLimit&&!await rateLimit.admit("invitation"))return new Response(null,{status:429,headers:{"Cache-Control":"no-store"}});
     if(context.req.header("content-type")!==TRANSFER_MEDIA_TYPE||context.req.header("content-encoding")!==undefined)
@@ -74,6 +76,16 @@ export function registerManagedTransferRoutes(app:Hono,receiver?:ManagedTransfer
         !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(receipt.transfer_id))throw new Error("Invalid retirement receipt subject");
       await fence.retire(receipt.did,receipt.transfer_id,signed);
       return new Response(null,{status:204,headers:{"Cache-Control":"no-store"}});
+    } catch {return new Response(null,{status:400,headers:{"Cache-Control":"no-store"}});}
+  });
+  if(completion)app.post("/.well-known/hail/transfers/managed-completions",async context=>{
+    if(rateLimit&&!await rateLimit.admit("request"))return new Response(null,{status:429});
+    if(context.req.header("Content-Type")!==TRANSFER_MEDIA_TYPE||context.req.header("Content-Encoding")!==undefined)
+      return new Response(null,{status:415});
+    try {
+      const input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(
+        await boundedTransferBody(context.req.raw.body,context.req.header("Content-Length")??null,100_000_000)));
+      return context.json(await completion.complete(input),200,{"Content-Type":TRANSFER_MEDIA_TYPE,"Cache-Control":"no-store"});
     } catch {return new Response(null,{status:400,headers:{"Cache-Control":"no-store"}});}
   });
 }

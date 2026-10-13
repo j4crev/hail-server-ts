@@ -13,6 +13,7 @@ const config: AppConfig = {
   plcDirectoryUrl: "http://localhost:2582",
   databaseUrl: "postgresql://hail:secret@localhost:5432/hail_app",
   keyEncryptionKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  pocManagedTransfer: false,
 };
 
 const binding: PublishedAddressBinding = {

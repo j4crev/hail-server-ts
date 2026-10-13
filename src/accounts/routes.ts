@@ -119,7 +119,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
           if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Invalid object");}catch{return problem(400);}
         return context.json(action==="transfer-offer"?await transfer.offer(session,input):action==="transfer-export"?await transfer.exportSnapshot(session,input):await transfer.cancel(session,input));
       }
-      if(action==="managed-transfer-status"||action==="managed-transfer-offer") {
+      if(action==="managed-transfer-status"||action==="managed-transfer-offer"||action==="managed-transfer-export") {
         if(!session.scopes.includes(action==="managed-transfer-status"?"account:read":"account:write"))return problem(403);
         if(!managedTransfer)return problem(503);
         if(action==="managed-transfer-status"){
@@ -130,7 +130,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
         const bytes=await accountRequestBytes(context.req.raw);if(!bytes||bytes.length>16384)return problem(413);
         let input:Record<string,unknown>;try{input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes)) as Record<string,unknown>;
           if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Invalid object");}catch{return problem(400);}
-        return context.json(await managedTransfer.offer(session,input));
+        return context.json(action==="managed-transfer-export"?await managedTransfer.exportSnapshot(session,input):await managedTransfer.offer(session,input));
       }
       if(action==="update-proposal"||action==="managed-update") {
         if(!session.scopes.includes("grants:write"))return problem(403);
@@ -314,6 +314,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
   app.all("/api/v1/account/transfers/export",context=>handle(context,null,"transfer-export"));
   app.all("/api/v1/account/transfers/managed",context=>handle(context,null,"managed-transfer-status"));
   app.all("/api/v1/account/transfers/managed/offer",context=>handle(context,null,"managed-transfer-offer"));
+  app.all("/api/v1/account/transfers/managed/export",context=>handle(context,null,"managed-transfer-export"));
   app.all("/api/v1/account/custody/managed",context=>handle(context,null,"custody-prepare"));
   app.all("/api/v1/account/custody/owner-controlled/review",context=>handle(context,null,"custody-review-owner"));
   app.all("/api/v1/account/custody/owner-controlled",context=>handle(context,null,"custody-prepare-owner"));

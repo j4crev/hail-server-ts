@@ -76,6 +76,10 @@ The base file alone selects the older `hail-server-ts:poc` image and omits the
 signup/access gates. Fresh source installations can use the base build procedure below;
 the overlay above records the specific current VPS release.
 
+Managed provider migration remains disabled unless the release overlay also sets
+`POC_MANAGED_TRANSFER=true`. That gate requires all account/transfer/return gates
+above and the configured private PLC; startup refuses public or mixed profiles.
+
 For a fresh install, follow **VPS Baseline → Secrets → Cloudflare DNS → Start
 → Create Test Identities**, recording the new DIDs printed by your own
 onboarding commands. Then use the message/reply walkthroughs below. The dated

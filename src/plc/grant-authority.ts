@@ -12,8 +12,8 @@ export async function retainPublicGrantAuthority(sql:SQL,revision:SignedGrantRev
   if(consent)checks.push(
     {purpose:"consent-binding",evidence:consent.address.plcEvidence,did:revision.payload.grantee,role:"hail-identity",key:consent.address.identityDidKey,serviceBase:consent.address.serviceBase},
     {purpose:"consent-profile",evidence:consent.senderProfile.plcEvidence,did:revision.payload.grantee,role:"hail-messaging",key:consent.senderProfile.messagingDidKey,serviceBase:consent.senderProfile.serviceBase});
-  if(!checks.some(check=>check.evidence?.verification))return;
-  if(checks.some(check=>!check.evidence?.verification)||revision.localRole==="grantee"&&!revision.recipientServiceBase)throw new Error("Public Grant commit requires complete unmixed authority evidence");
+  if(!checks.some(check=>check.evidence?.verification?.profile==="strict-public-v1"))return;
+  if(checks.some(check=>check.evidence?.verification?.profile!=="strict-public-v1")||revision.localRole==="grantee"&&!revision.recipientServiceBase)throw new Error("Public Grant commit requires complete unmixed authority evidence");
   const now=(await sql<{instant:Date}[]>`SELECT clock_timestamp() AS instant`)[0]!.instant;
   for(const check of checks){
     const digest=await requireFreshPublicAuthority(sql,check.evidence!,check,now);

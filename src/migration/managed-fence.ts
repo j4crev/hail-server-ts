@@ -37,7 +37,8 @@ function fromRow(row: FenceRow): ManagedMigrationFence {
 
 export class ManagedMigrationFenceService {
   constructor(private readonly sql: SQL, private readonly resolver: HailDidResolver,
-    private readonly sourceServiceBase: string, private readonly now = () => Math.floor(Date.now() / 1000)) {}
+    private readonly sourceServiceBase: string, private readonly now = () => Math.floor(Date.now() / 1000),
+    private readonly verificationMode:"strict-public-v1"|"poc-local"="strict-public-v1") {}
 
   async begin(requestSigned: SignedManagedHandshake, selectionSigned: SignedManagedHandshake,
     reservationSigned: SignedManagedHandshake): Promise<ManagedMigrationFence> {
@@ -49,7 +50,7 @@ export class ManagedMigrationFenceService {
     const resolved = await this.resolver.resolve(did);
     const plc = def.documentData.parse(resolved.evidence.data);
     const ownerRecoveryKey = plc.rotationKeys[0];
-    if (!ownerRecoveryKey || !resolved.evidence.verification || resolved.did !== did ||
+    if (!ownerRecoveryKey || resolved.evidence.verification?.profile!==this.verificationMode || resolved.did !== did ||
       resolved.serviceBase !== this.sourceServiceBase) {
       throw new Error("Managed fence requires strict current source authority");
     }
@@ -65,7 +66,7 @@ export class ManagedMigrationFenceService {
       if (!account || account.onboarding_state !== "active" || account.activation_verification_mode !== "public" ||
         account.owner_recovery_public_key !== ownerRecoveryKey ||
         account.provider_identity_public_key !== resolved.identityDidKey ||
-        account.verification_mode !== "strict-public-v1" ||
+        account.verification_mode !== this.verificationMode ||
         !held.some((key) => key.role === "hail-identity" && key.public_key === resolved.identityDidKey) ||
         !held.some((key) => key.role === "hail-messaging" && key.public_key === resolved.messagingDidKey) ||
         !held.some((key) => key.role === "plc-rotation" && plc.rotationKeys.slice(1).includes(key.public_key))) {
@@ -227,6 +228,14 @@ export class ManagedMigrationFenceService {
       same(row.final_request_bytes, request.payloadBytes) && same(row.final_request_signature, request.signature) &&
       same(row.selection_bytes, selection.payloadBytes) && same(row.selection_signature, selection.signature) &&
       same(row.reservation_bytes, reservation.payloadBytes) && same(row.reservation_signature, reservation.signature);
+  }
+
+  async get(did:string):Promise<ManagedMigrationFence|null> {
+    const row=(await this.sql<FenceRow[]>`SELECT did,account_id,transfer_id,destination_service_base,
+      owner_recovery_public_key,source_identity_public_key,destination_identity_public_key,
+      destination_rotation_public_key,destination_messaging_public_key,state
+      FROM provider_migration_fences WHERE did=${did}`)[0];
+    return row?fromRow(row):null;
   }
 
   async retire(did:string,transferId:string,signed:SignedActivationReceipt):Promise<void> {
