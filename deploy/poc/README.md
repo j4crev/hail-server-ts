@@ -11,18 +11,19 @@ POC supports message/reply delivery and fresh user-key-held private-PLC DID
 transfers, including pending-message continuity. Original Alice/Bob accounts
 remain custodial and cannot be used as portable migration sources.
 
-The migration-49 compatibility rollout uses provider source `368d526`, image
-`hail-server-ts:poc-managed-materialization-20261013` (ID
-`sha256:bea15bb48f6e94152e756816385b7b60e12591dd97e2dfa413f6ecfef4831ed5`)
-and retained source `/opt/hail-managed-materialization-release-20261013`.
-Restored app/dev copies passed 48→49→48→49 with unchanged pre-existing row
-hashes, repeat candidate startup and old-image readiness. Fresh provider/PLC
-backups and rollout evidence are under
-`/var/backups/hail-poc/pre-managed-materialization-20261013T000500Z`.
-Providers were rolled individually and both external readiness endpoints,
-account authentication floors, internal PLC configuration and monitor stack
-remained healthy. Managed migration completion is still not wired into startup;
-its public routes remain disabled and no public PLC request was made.
+The managed private-PLC rollout uses provider source `5d4d219`, image
+`hail-server-ts:poc-managed-operationalization-20261013-fix1` (ID
+`sha256:d2d30974a2ab557fcafad31ea2c20768e3ec62f9907fcbae332ec92bec8fa9be`)
+and retained source `/opt/hail-managed-operationalization-release-20261013`.
+Fresh provider/PLC backups and rollout evidence are under
+`/var/backups/hail-poc/pre-managed-operationalization-20261013T004200Z`.
+Restored app/dev copies passed gated startup, schema and row-hash checks. The
+providers were rolled individually, then a disposable managed account passed a
+real HTTPS app→dev→app round trip at generations 1→2→3 through deliberately lost
+responses and provider restarts. Fresh owner-recovery login succeeded and old
+source credentials were rejected. The configured registry remains the internal
+private PLC; no public PLC request was made. Same-VPS monitoring remains
+non-independent and this does not satisfy the production gate.
 
 The account-API/`hailp` slice adds migrations **32–33** and is now deployed to
 both providers. Both custody profiles passed fresh HTTPS signup, account reads
@@ -62,11 +63,12 @@ Internal abandonment has no public route. After generation advancement, do not
 downgrade to generation-unaware code or treat schema rollback as ownership recovery.
 
 The current VPS provider configuration uses `compose.cli-release.yaml` alongside
-the base Compose file, pins `hail-server-ts:poc-managed-materialization-20261013`, points its
-build context at `/opt/hail-managed-materialization-release-20261013`, and explicitly enables
+the base Compose file, pins `hail-server-ts:poc-managed-operationalization-20261013-fix1`, points its
+build context at `/opt/hail-managed-operationalization-release-20261013`, and explicitly enables
 private-PLC signup and owner access (`POC_SELF_SERVICE_ONBOARDING=true`,
 `POC_ACCOUNT_ACCESS=true`), transfer and stable-owner return
-(`POC_SELF_SERVICE_TRANSFER=true`, `POC_SELF_SERVICE_RETURN=true`). Include the overlay for live stack operations:
+(`POC_SELF_SERVICE_TRANSFER=true`, `POC_SELF_SERVICE_RETURN=true`) and managed
+private-PLC migration (`POC_MANAGED_TRANSFER=true`). Include the overlay for live stack operations:
 
 ```bash
 docker compose --env-file .env -f compose.yaml -f compose.cli-release.yaml ps
