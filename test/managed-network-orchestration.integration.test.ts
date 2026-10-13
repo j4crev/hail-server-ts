@@ -1,7 +1,14 @@
 import {createHash,randomBytes,randomUUID} from "node:crypto";
 import {cidForCbor} from "@atproto/common";
 import {P256Keypair} from "@atproto/crypto";
-import {didForCreateOp,signOperation,validateOperationLog} from "@did-plc/lib";
+import {didForCreateOp,formatDidDoc,signOperation,validateOperationLog} from "@did-plc/lib";
+import {encode as encodeDagCbor} from "@ipld/dag-cbor";
+import {base58btc} from "multiformats/bases/base58";
+import {VerifiedPublicPlcResolver} from "../src/plc/public-resolver.js";
+import {plcStateDigest} from "../src/plc/read-evidence.js";
+import {signMonitorAttestation,type PlcMonitorAttestation} from "../src/migration/monitor-attestation.js";
+import {createPublicManagedRuntime} from "../src/migration/public-managed-runtime.js";
+import {loadConfig} from "../src/config.js";
 import {createWebCryptoSigner,createWebCryptoVerifier,decodeBase64Url,decodeDeterministic,encodeBase64Url,encodeDeterministic,signPayload,
   verifySignedPayload,type HailEnvelope,type HailGrant,type HailValue} from "@hailproto/codec";
 import {SQL} from "bun";
@@ -41,11 +48,12 @@ import {finalRequestWire,parseRequestWire,requestWire,TRANSFER_MEDIA_TYPE} from 
 
 const integration=process.env.DATABASE_URL?it:it.skip;
 
-integration("materializes an exact managed A to B to A round trip across fixed HTTPS routes",async()=>{
+integration.each(["poc-local","strict-public-v1"] as const)("materializes an exact managed A to B to A round trip (%s) across injected HTTPS routes",async profile=>{
   const admin=new SQL(process.env.DATABASE_URL!),suffix=randomUUID().replaceAll("-",""),sourceSchema=`managed_net_a_${suffix}`,
     targetSchema=`managed_net_b_${suffix}`;await admin.unsafe(`CREATE SCHEMA "${sourceSchema}"`);await admin.unsafe(`CREATE SCHEMA "${targetSchema}"`);
   const scoped=(schema:string)=>{const url=new URL(process.env.DATABASE_URL!);url.searchParams.set("options",`-csearch_path=${schema}`);return url.toString();};
   const source=new ProviderDatabase(scoped(sourceSchema)),target=new ProviderDatabase(scoped(targetSchema));
+  let phase="source preparation";
   try {
     await source.migrate();await target.migrate();const accountId=randomUUID();
     const sourceOrigin="https://a.example.com",sourceBase=`${sourceOrigin}/hail`,targetBase="https://b.example.com/hail";
@@ -63,8 +71,12 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       encryption_nonce,encryption_version,kek_id) VALUES (${accountId},${key.role},${key.algorithm},${key.publicKey},
       ${key.ciphertext},${key.nonce},${key.encryptionVersion},${key.kekId})`;
     await source.sql`INSERT INTO managed_custody_evidence(account_id,owner_recovery_public_key,provider_identity_public_key,
-      verification_mode,managed_profile_version) VALUES (${accountId},${owner.did()},${keys.identityDidKey},'poc-local',
+      verification_mode,managed_profile_version) VALUES (${accountId},${owner.did()},${keys.identityDidKey},${profile},
         'hail-managed-custody-v1')`;
+    if(profile==="strict-public-v1")await source.sql`INSERT INTO plc_operation_evidence(id,account_id,did,operation_cid,
+      registry_origin,signed_operation,signed_operation_bytes,dag_cbor,expected_state,submission_state,verified_at)
+      VALUES(${randomUUID()},${accountId},${did},${genesisCid},'https://plc.directory',${JSON.stringify(genesis)}::jsonb,
+        ${new TextEncoder().encode(JSON.stringify(genesis))},${new Uint8Array(encodeDagCbor(genesis))},${JSON.stringify(currentState)}::jsonb,'verified',now())`;
     const grantId=uuidV7(),grantee=`did:plc:${"f".repeat(24)}`,grantNow=Math.floor(Date.now()/1000),grant:HailGrant={
       type:"hail.grant",version:1,grant_id:grantId,revision:1,previous:null,grantor:did,grantee,
       scope:[{type:"uncategorized"}],status:"active",issued_at:grantNow,updated_at:grantNow,expires_at:null,
@@ -118,12 +130,33 @@ integration("materializes an exact managed A to B to A round trip across fixed H
         'fixture','{}'::jsonb,'{}'::jsonb,'[]'::jsonb,'accepted',now())`;
     await source.sql`INSERT INTO delivery_work(sender_did,message_id) VALUES(${grantee},${incomingId})`;
     let plcLog=[genesis];
-    const resolver={async resolve(value:string){if(value!==did)throw new Error("unknown DID");const data=(await validateOperationLog(did,plcLog))!,last=plcLog.at(-1)!;
+    const rawResolver={async resolve(value:string){if(value!==did)throw new Error("unknown DID");const data=(await validateOperationLog(did,plcLog))!,last=plcLog.at(-1)!;
       return {did,identityDidKey:data.verificationMethods["hail-identity"]!,messagingDidKey:data.verificationMethods["hail-messaging"]!,
-        serviceBase:data.services.hail!.endpoint,evidence:{document:{},data,log:plcLog,verification:{profile:"poc-local" as const,
+        serviceBase:data.services.hail!.endpoint,evidence:{document:formatDidDoc(data),data,log:plcLog,verification:{profile:"poc-local" as const,
           digest:"fixture",operationCid:(await cidForCbor(last)).toString(),verifiedAt:new Date().toISOString()}}};}};
+    let readerFailure=false;
+    let readerDisagreement=false;
+    const auditCreatedAt=new Date(Date.now()-60_000).toISOString();
+    const readers=["one","two"].map(name=>({origin:`https://reader-${name}.example.com`,operator:`reader-${name}`,
+      resolver:{async resolve(value:string){if(readerFailure&&name==="two")throw new Error("reader outage");const result=await rawResolver.resolve(value);
+        return readerDisagreement&&name==="two"?{...result,serviceBase:sourceBase}:result;}},
+      async audit(){return Promise.all(plcLog.map(async operation=>({did,cid:(await cidForCbor(operation)).toString(),operation,
+        nullified:false,createdAt:auditCreatedAt})));}})) as unknown as
+      readonly [import("../src/plc/observers.js").IndependentPlcObserver,import("../src/plc/observers.js").IndependentPlcObserver];
+    const resolver=profile==="strict-public-v1"?new VerifiedPublicPlcResolver(source.sql,readers,["provider-a","provider-b"],[sourceOrigin,"https://b.example.com"]):rawResolver;
+    const targetResolver=profile==="strict-public-v1"?new VerifiedPublicPlcResolver(target.sql,readers,["provider-a","provider-b"],[sourceOrigin,"https://b.example.com"]):rawResolver;
+    const monitorPair=await crypto.subtle.generateKey("Ed25519",true,["sign","verify"]),monitor={monitorOrigin:"https://monitor.example.com",
+      monitorPublicKey:`did:key:${base58btc.encode(new Uint8Array([0xed,1,...new Uint8Array(await crypto.subtle.exportKey("raw",monitorPair.publicKey))]))}`};
+    const runtimeConfig=(origin:string)=>loadConfig({NODE_ENV:"production",PORT:"3000",PROVIDER_ID:"fixture",PUBLIC_ORIGIN:origin,
+      HAIL_SERVICE_BASE:`${origin}/hail`,PLC_DIRECTORY_URL:"https://plc.directory",DATABASE_URL:process.env.DATABASE_URL!,
+      KEY_ENCRYPTION_KEY:encodeBase64Url(randomBytes(32)),PLC_AUTHORITY_PROFILE:"strict-public-v1",
+      PLC_PUBLIC_READERS:JSON.stringify(readers.map(({origin,operator})=>({origin,operator}))),PLC_PROVIDER_OPERATORS:'["provider-a","provider-b"]',
+      PUBLIC_MANAGED_TRANSFER:"true",PLC_MANAGED_MONITOR_ORIGIN:monitor.monitorOrigin,PLC_MANAGED_MONITOR_PUBLIC_KEY:monitor.monitorPublicKey});
+    const attestation=async(transferId:string,cid:string)=>signMonitorAttestation({type:"hail.plc-monitor-attestation",version:2,did,
+      transfer_id:transferId,operation_cid:cid,monitor_origin:monitor.monitorOrigin,coverage_since:Math.floor(Date.now()/1000)-120,
+      observed_at:Math.floor(Date.now()/1000),bootstrap_cid:genesisCid,bootstrap_state_digest:plcStateDigest(currentState),export_sequence:plcLog.length},monitorPair.privateKey);
     const targetEncryptor=new KeyEncryptor(encodeBase64Url(randomBytes(32))),targetKeys=new PreparedMigrationTarget(target.sql,targetEncryptor,targetBase);
-    const destination=new Hono(),receiver=new ManagedTransferInvitationReceiver(target.sql,resolver,targetKeys);
+    const destination=new Hono(),receiver=new ManagedTransferInvitationReceiver(target.sql,targetResolver,targetKeys);
     const accounts=new AccountApiRepository(source.sql),credential=await accounts.issue("alice@a.example.com",false,undefined,["account:read","account:write"]);
     const onboarding=new OnboardingRepository(source.sql);
     const authorization=new ManagedTransferAuthorization(source.sql,resolver,sourceBase,onboarding,sourceEncryptor);
@@ -132,15 +165,15 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       async request=>++deliveryAttempts===1?new Response(null,{status:503}):
         withFreshServingGenerations(target.sql,()=>destination.fetch(request)),url=>{
       if(url.href!=="https://b.example.com/.well-known/hail/transfers/managed-invitations")throw new Error("wrong target");});
-    const fence=new ManagedMigrationFenceService(source.sql,resolver,sourceBase,undefined,"poc-local");
+    const fence=new ManagedMigrationFenceService(source.sql,resolver,sourceBase,undefined,profile);
     let sourceApp:Hono, fenceAttempts=0;
-    const reservations=new ManagedTransferAddressReservation(target.sql,resolver,targetKeys);
-    const publisher=new ManagedTransferFencePublisher(target.sql,resolver,targetKeys,async request=>{
+    const reservations=new ManagedTransferAddressReservation(target.sql,targetResolver,targetKeys);
+    const publisher=new ManagedTransferFencePublisher(target.sql,targetResolver,targetKeys,async request=>{
       if(++fenceAttempts===1)return new Response(null,{status:503});
       return withFreshServingGenerations(source.sql,()=>sourceApp.fetch(request));
     },url=>{if(url.href!==`${sourceBase}/transfers/managed-requests`)throw new Error("wrong source fence target");});
     registerManagedTransferRoutes(destination,receiver,undefined,reservations,publisher);
-    const exporter=new ManagedMigrationExportService(source.sql,onboarding,sourceEncryptor,resolver,sourceBase,undefined,"poc-local");
+    const exporter=new ManagedMigrationExportService(source.sql,onboarding,sourceEncryptor,resolver,sourceBase,undefined,profile);
     const managed=new ManagedAccountTransfer(source.sql,authorization,delivery,sourceOrigin,{fence,snapshots:exporter}),app=new Hono();sourceApp=app;
     registerAccountApiRoutes(app,accounts,{} as never,{} as never,sourceOrigin,undefined,undefined,undefined,undefined,managed);
     registerManagedTransferRoutes(app,undefined,undefined,undefined,undefined,fence);
@@ -268,7 +301,9 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       issued_at:now,expires_at:now+900};
     const approvalBytes=encodeManagedHandshake(approval),approvalSigned={payloadBytes:approvalBytes,
       signature:await owner.sign(managedHandshakeSignatureInput(approval.type,approvalBytes))};
-    const stager=new ManagedMigrationStageService(target.sql,resolver,targetKeys,targetBase,()=>now,"poc-local");
+    const stager=new ManagedMigrationStageService(target.sql,targetResolver,targetKeys,targetBase,()=>now,profile);
+    if(profile==="poc-local")await expect(new ManagedMigrationStageService(target.sql,targetResolver,targetKeys,targetBase)
+      .stage(exported,approvalSigned,cutoverBytes)).rejects.toThrow(/authority profile/);
     expect(await stager.stage(exported,approvalSigned,cutoverBytes)).toEqual(manifest);
     const staged=(await target.sql<{state:string;custody_profile:string;owner_recovery_public_key:string;
       source_identity_public_key:string;destination_identity_public_key:string;destination_address:string;
@@ -351,7 +386,7 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     let submissions=0;
     const plc={async getOperationLog(){return plcLog;},async sendOperation(_did:string,operation:typeof cutover){
       submissions++;plcLog=[...plcLog,operation];throw new Error("lost PLC response");}};
-    const submitter=new ManagedMigrationPlcSubmission(target.sql,plc,resolver,targetBase);
+    const submitter=new ManagedMigrationPlcSubmission(target.sql,plc,targetResolver,targetBase);
     await expect(submitter.submit(offer.transfer_id)).resolves.toBe(cutoverCid);
     await expect(submitter.submit(offer.transfer_id)).resolves.toBe(cutoverCid);
     expect(submissions).toBe(1);
@@ -365,26 +400,59 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     await target.sql`INSERT INTO public_plc_resolution_evidence
       (evidence_digest,did,operation_cid,verified_at,bundle_bytes,record_version,read_evidence_policy_version)
       VALUES(${evidenceDigest},${did},${cutoverCid},${verifiedAt},${bundle},1,'hail.plc-read-evidence-v1')`;
-    const strictResolver={async resolve(value:string){const result=await resolver.resolve(value);return {...result,evidence:{...result.evidence,
+    const strictResolver={async resolve(value:string){const result=await targetResolver.resolve(value);return {...result,evidence:{...result.evidence,
       verification:{profile:"poc-local" as const,digest:encodeBase64Url(evidenceDigest),operationCid:cutoverCid,verifiedAt}}};}};
     const binding=decodeDeterministic((await verifySignedPayload("hail.address-binding",new Uint8Array(staged.destination_binding_cose),
       createWebCryptoVerifier(()=>ed25519PublicKeyFromDidKey(offer.destination_identity_key)))).payloadBytes) as any;
     const verifier={async verify(address:string){return {address,did,serviceBase:targetBase,identityDidKey:offer.destination_identity_key,
       messagingDidKey:offer.destination_messaging_key,plcEvidence:(await strictResolver.resolve(did)).evidence,verifiedAt:new Date(),
       binding,representation:new Uint8Array(staged.destination_binding_cose),digest:new Uint8Array(createHash("sha256").update(staged.destination_binding_cose).digest())};}};
-    const activation=new ManagedMigrationActivation(target.sql,targetEncryptor,strictResolver,verifier,targetBase,"http://plc.fixture:2582","poc-local");
-    const completion=new ManagedMigrationCompletion(stager,submitter,activation);
+    const publicRuntime=profile==="strict-public-v1"?createPublicManagedRuntime(runtimeConfig("https://b.example.com"),target.sql,
+      plc as never,new OnboardingRepository(target.sql),targetEncryptor,{fetch:async()=>{throw new Error("unexpected network");},validateTarget:()=>{}},verifier,readers):undefined;
+    const activation=publicRuntime?.activation??new ManagedMigrationActivation(target.sql,targetEncryptor,strictResolver,verifier,targetBase,"http://plc.fixture:2582","poc-local");
+    const completion=publicRuntime?.completion??new ManagedMigrationCompletion(stager,submitter,activation);
+    const monitorSigned=await attestation(offer.transfer_id,cutoverCid);
+    if(publicRuntime) {
+      phase="public destination activation";
+      await expect(activation.activate(offer.transfer_id)).rejects.toThrow(/monitor/);
+      await expect(activation.activate(offer.transfer_id,{...monitorSigned,signature:new Uint8Array(64)})).rejects.toThrow(/signature/);
+      const report=decodeDeterministic(monitorSigned.payloadBytes) as unknown as PlcMonitorAttestation;
+      for(const overrides of [{observed_at:report.observed_at-301,coverage_since:report.observed_at-500},
+        {coverage_since:report.observed_at+10,observed_at:report.observed_at+10},
+        {bootstrap_state_digest:encodeBase64Url(new Uint8Array(32))},
+        {monitor_origin:"https://unreviewed.example.com"}]) {
+        const bad=await signMonitorAttestation({...report,...overrides},monitorPair.privateKey);
+        await expect(activation.activate(offer.transfer_id,bad)).rejects.toThrow();
+      }
+      readerFailure=true;await expect(activation.activate(offer.transfer_id,monitorSigned)).rejects.toThrow(/outage/);readerFailure=false;
+      readerDisagreement=true;await expect(activation.activate(offer.transfer_id,monitorSigned)).rejects.toThrow(/Mirror/);readerDisagreement=false;
+      expect(await target.sql`SELECT 1 FROM public_cutover_evidence`).toHaveLength(0);
+      expect(await target.sql`SELECT 1 FROM provider_accounts WHERE id=${accountId}`).toHaveLength(0);
+    }
     const completionApp=new Hono();registerManagedTransferRoutes(completionApp,undefined,undefined,undefined,undefined,undefined,completion);
     const completionBody=JSON.stringify({snapshot:{type:"hail.managed-migration-transfer",version:4,
       manifest:encodeBase64Url(exported.bytes),digest:encodeBase64Url(exported.digest),signature:encodeBase64Url(exported.signature),
       sourceMessagingPublicKey:exported.sourceMessagingPublicKey},approval:{payload:encodeBase64Url(approvalSigned.payloadBytes),
-      signature:encodeBase64Url(approvalSigned.signature)},operation:encodeBase64Url(cutoverBytes)});
+       signature:encodeBase64Url(approvalSigned.signature)},operation:encodeBase64Url(cutoverBytes),...(publicRuntime?{monitor:{
+         payload:encodeBase64Url(monitorSigned.payloadBytes),signature:encodeBase64Url(monitorSigned.signature)}}:{})});
+    if(publicRuntime) {
+      const withoutMonitor=JSON.parse(completionBody);delete withoutMonitor.monitor;
+      expect(await withFreshServingGenerations(target.sql,()=>completion.complete(withoutMonitor))).toMatchObject({phase:"awaiting-monitor",operationCid:cutoverCid});
+      expect(await target.sql`SELECT 1 FROM provider_accounts WHERE id=${accountId}`).toHaveLength(0);
+    }
     const complete=()=>withFreshServingGenerations(target.sql,()=>completionApp.request(
       "https://b.example.com/.well-known/hail/transfers/managed-completions",{method:"POST",
         headers:{"Content-Type":TRANSFER_MEDIA_TYPE},body:completionBody}));
+    phase="completion route retries";
     const completed=await complete();expect(completed.status).toBe(200);expect(await completed.json()).toMatchObject({
       type:"hailp.managed-transfer-completion",did,accountId,transferId:offer.transfer_id,generation:2,phase:"active"});
+    if(publicRuntime)expect(await target.sql`SELECT 1 FROM public_cutover_evidence_selection WHERE transfer_id=${offer.transfer_id} AND activated_at IS NOT NULL`).toHaveLength(1);
     expect((await complete()).status).toBe(200);
+    if(publicRuntime) {
+      readerFailure=true;await expect(activation.activate(offer.transfer_id)).rejects.toThrow(/outage/);readerFailure=false;
+      await expect(target.sql`DELETE FROM public_cutover_evidence`).rejects.toThrow(/immutable/);
+      expect(await target.sql`SELECT 1 FROM managed_custody_evidence WHERE account_id=${accountId} AND verification_mode='strict-public-v1'`).toHaveLength(1);
+    }
     expect(await withFreshServingGenerations(target.sql,()=>activation.activate(offer.transfer_id)))
       .toEqual({did,accountId,generation:2});
     expect(await withFreshServingGenerations(target.sql,()=>activation.activate(offer.transfer_id)))
@@ -407,6 +475,7 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     expect(await target.sql`SELECT 1 FROM detached_bodies WHERE sender_account_id=${accountId} AND digest=${bodyHash}`).toHaveLength(1);
     expect((await target.sql<{state:string}[]>`SELECT state FROM delivery_work WHERE sender_did=${grantee} AND message_id=${incomingId}`)[0]?.state).toBe("accepted");
     expect(await target.sql`SELECT 1 FROM account_api_credentials WHERE account_id=${accountId}`).toHaveLength(0);
+    phase="source retirement";
     const receipt=await activation.issueReceipt(offer.transfer_id);
     expect(await activation.issueReceipt(offer.transfer_id)).toEqual(receipt);
     const retire=()=>withFreshServingGenerations(source.sql,()=>sourceApp.request(
@@ -427,6 +496,7 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     expect(changedRetirement.status).toBe(400);
     await withFreshServingGenerations(target.sql,()=>target.sql`UPDATE grant_publications SET state='acknowledged',
       acknowledged_etag='"grant-v2"',acknowledged_at=clock_timestamp() WHERE grant_id=${grantId} AND revision=2`);
+    phase="return preparation";
     const returnNow=Math.floor(Date.now()/1000),returnGrantValue:ManagedTransferGrant={type:"hail.managed-transfer-grant",version:1,did,
       nonce:randomUUID(),source_service_base:targetBase,destination_service_base:sourceBase,destination_domain:"a.example.com",
       owner_recovery_key:owner.did(),source_identity_key:offer.destination_identity_key,issued_at:returnNow,expires_at:returnNow+3600};
@@ -461,7 +531,7 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       VALUES(${did},${accountId},${returnTransfer},${sourceBase},${returnKeys.rotationPublicKey},${returnKeys.messagingPublicKey},
         'fenced','managed',${owner.did()},${offer.destination_identity_key},${returnKeys.identityPublicKey})`;
     await source.sql`UPDATE transfer_address_reservations SET state='submitted' WHERE transfer_id=${returnTransfer}`;
-    const returnExport=await new ManagedMigrationExportService(target.sql,new OnboardingRepository(target.sql),targetEncryptor,resolver,targetBase,undefined,"poc-local")
+    const returnExport=await new ManagedMigrationExportService(target.sql,new OnboardingRepository(target.sql),targetEncryptor,targetResolver,targetBase,undefined,profile)
       .exportFenced({did,accountId,transferId:returnTransfer,destinationServiceBase:sourceBase,ownerRecoveryPublicKey:owner.did(),
         sourceIdentityPublicKey:offer.destination_identity_key,destinationIdentityPublicKey:returnKeys.identityPublicKey!,
         destinationRotationPublicKey:returnKeys.rotationPublicKey,destinationMessagingPublicKey:returnKeys.messagingPublicKey,state:"fenced"});
@@ -493,7 +563,7 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       source_generation:2,previous_operation_cid:cutoverCid,operation_cid:returnCid,issued_at:returnNow,expires_at:returnNow+900};
     const returnApprovalBytes=encodeManagedHandshake(returnApprovalValue),returnApproval={payloadBytes:returnApprovalBytes,
       signature:await owner.sign(managedHandshakeSignatureInput(returnApprovalValue.type,returnApprovalBytes))};
-    const returnStager=new ManagedMigrationStageService(source.sql,resolver,returnTarget,sourceBase,()=>returnNow,"poc-local");
+    const returnStager=new ManagedMigrationStageService(source.sql,resolver,returnTarget,sourceBase,()=>returnNow,profile);
     expect(await returnStager.stage(returnExport,returnApproval,returnCutoverBytes)).toEqual(returnManifest);
     await expect(new ManagedMigrationPlcSubmission(source.sql,plc,resolver,sourceBase).submit(returnTransfer)).resolves.toBe(returnCid);
     const returnState=(await validateOperationLog(did,plcLog))!,returnVerifiedAt=new Date().toISOString(),returnBundle=encodeDeterministic({
@@ -512,8 +582,12 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     const returnVerifier={async verify(address:string){return {address,did,serviceBase:sourceBase,identityDidKey:returnKeys.identityPublicKey!,
       messagingDidKey:returnKeys.messagingPublicKey,plcEvidence:(await returnResolver.resolve(did)).evidence,verifiedAt:new Date(),
       binding:returnBinding,representation:returnStaged.destination_binding_cose,digest:returnStaged.destination_binding_digest};}};
-    const returnActivation=new ManagedMigrationActivation(source.sql,sourceEncryptor,returnResolver,returnVerifier,sourceBase,"http://plc.fixture:2582","poc-local");
-    expect(await withFreshServingGenerations(source.sql,()=>returnActivation.activate(returnTransfer))).toEqual({did,accountId,generation:3});
+    const returnRuntime=profile==="strict-public-v1"?createPublicManagedRuntime(runtimeConfig(sourceOrigin),source.sql,plc as never,
+      new OnboardingRepository(source.sql),sourceEncryptor,{fetch:async()=>{throw new Error("unexpected network");},validateTarget:()=>{}},returnVerifier,readers):undefined;
+    const returnActivation=returnRuntime?.activation??new ManagedMigrationActivation(source.sql,sourceEncryptor,returnResolver,returnVerifier,sourceBase,"http://plc.fixture:2582","poc-local");
+    const returnMonitor=await attestation(returnTransfer,returnCid);
+    phase="return activation";
+    expect(await withFreshServingGenerations(source.sql,()=>returnActivation.activate(returnTransfer,returnMonitor))).toEqual({did,accountId,generation:3});
     expect(await withFreshServingGenerations(source.sql,()=>returnActivation.activate(returnTransfer))).toEqual({did,accountId,generation:3});
     expect(Number((await source.sql<{generation:string|number}[]>`SELECT generation FROM account_serving_generations WHERE account_id=${accountId}`)[0]?.generation)).toBe(3);
     expect((await source.sql<{canonical_address:string}[]>`SELECT canonical_address FROM provider_accounts WHERE id=${accountId}`)[0]?.canonical_address)
@@ -538,7 +612,7 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     await expect(withServingGeneration(accountId,1,()=>source.sql`UPDATE provider_accounts SET updated_at=clock_timestamp() WHERE id=${accountId}`))
       .rejects.toThrow(/stale/);
     const returnReceipt=await returnActivation.issueReceipt(returnTransfer);
-    const targetFence=new ManagedMigrationFenceService(target.sql,resolver,targetBase,undefined,"poc-local");
+    const targetFence=new ManagedMigrationFenceService(target.sql,targetResolver,targetBase,undefined,profile);
     await targetFence.retire(did,returnTransfer,returnReceipt);await targetFence.retire(did,returnTransfer,returnReceipt);
     const archivedImport=(await target.sql<{prepared:string}[]>`SELECT prepared_public_record::text AS prepared
       FROM provider_retired_import_history WHERE transfer_id=${offer.transfer_id}`)[0]?.prepared??"";
@@ -547,6 +621,7 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       await expect(rollback49.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql",import.meta.url)).text()))
         .rejects.toThrow("active imports exist");
     } finally {await rollback49.unsafe("ROLLBACK");rollback49.release();}
-  } finally {await source.close();await target.close();await admin.unsafe(`DROP SCHEMA "${sourceSchema}" CASCADE`);
+  } catch(error) {throw new Error(`${profile}: ${phase}`,{cause:error});}
+  finally {await source.close();await target.close();await admin.unsafe(`DROP SCHEMA "${sourceSchema}" CASCADE`);
     await admin.unsafe(`DROP SCHEMA "${targetSchema}" CASCADE`);await admin.close();}
 },45_000);

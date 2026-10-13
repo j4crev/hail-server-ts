@@ -16,12 +16,24 @@ it("completes only the exact retained managed artifacts",async()=>{
     snapshot={type:"hail.managed-migration-transfer",version:4,manifest:encodeBase64Url(bytes),digest:encodeBase64Url(digest),
       signature:encodeBase64Url(signature),sourceMessagingPublicKey:"did:key:zsource"},
     approval={payload:encodeBase64Url(new Uint8Array([1])),signature:encodeBase64Url(signature)};
-  const stage=vi.fn(async()=>({transferId})),submit=vi.fn(async()=>operationCid),activate=vi.fn(async()=>({did,accountId,generation:2})),
+  const stage=vi.fn(async()=>({transferId,did,accountId})),submit=vi.fn(async()=>operationCid),activate=vi.fn(async()=>({did,accountId,generation:2})),
     receipt={payloadBytes:new Uint8Array([2]),signature},issueReceipt=vi.fn(async()=>receipt),
     completion=new ManagedMigrationCompletion({stage} as never,{submit},{activate,issueReceipt});
   await expect(completion.complete({snapshot,approval,operation:encodeBase64Url(operationBytes)})).resolves.toMatchObject({
     type:"hailp.managed-transfer-completion",transferId,did,accountId,generation:2,operationCid,phase:"active"});
   expect(stage).toHaveBeenCalledOnce();expect(submit).toHaveBeenCalledWith(transferId);
-  expect(activate).toHaveBeenCalledWith(transferId);expect(issueReceipt).toHaveBeenCalledWith(transferId);
+  expect(activate).toHaveBeenCalledWith(transferId,undefined);expect(issueReceipt).toHaveBeenCalledWith(transferId);
   await expect(completion.complete({...snapshot})).rejects.toThrow(/requires exact/);
+  const publicCompletion=new ManagedMigrationCompletion({stage} as never,{submit},{activate,issueReceipt},true);
+  stage.mockClear();submit.mockClear();
+  const input={snapshot,approval,operation:encodeBase64Url(operationBytes)};
+  activate.mockClear();issueReceipt.mockClear();
+  await expect(publicCompletion.complete(input)).resolves.toMatchObject({phase:"awaiting-monitor",did,accountId,operationCid});
+  expect(activate).not.toHaveBeenCalled();expect(issueReceipt).not.toHaveBeenCalled();
+  stage.mockClear();submit.mockClear();
+  await expect(publicCompletion.complete({...input,monitor:{payload:"",signature:""}})).rejects.toThrow();
+  expect(stage).not.toHaveBeenCalled();expect(submit).not.toHaveBeenCalled();
+  await expect(completion.complete({...input,monitor:approval})).rejects.toThrow(/requires exact/);
+  await publicCompletion.complete({...input,monitor:approval});
+  expect(activate).toHaveBeenLastCalledWith(transferId,{payloadBytes:new Uint8Array([1]),signature});
 });

@@ -1,5 +1,7 @@
 import { publicPlcAuthorityConfig } from "./plc/public-resolver.js";
 import type { PublicPlcAuthorityConfig } from "./plc/observers.js";
+import { canonicalPlcReadOrigin } from "./plc/observers.js";
+import { base58btc } from "multiformats/bases/base58";
 
 export type NodeEnvironment = "development" | "test" | "production";
 
@@ -14,6 +16,7 @@ export interface AppConfig {
   keyEncryptionKey: string;
   publicPlcAuthority?: PublicPlcAuthorityConfig;
   pocManagedTransfer: boolean;
+  publicManagedTransfer?: { monitorOrigin: string; monitorPublicKey: string };
 }
 
 type Environment = Record<string, string | undefined>;
@@ -123,6 +126,23 @@ export function loadConfig(environment: Environment = Bun.env): AppConfig {
   const managedGate=environment.POC_MANAGED_TRANSFER?.trim();
   if(managedGate!==undefined&&managedGate!=="true"&&managedGate!=="false")throw new Error("POC_MANAGED_TRANSFER must be true or false");
   const pocManagedTransfer=managedGate==="true";
+  const publicGate=environment.PUBLIC_MANAGED_TRANSFER?.trim();
+  if(publicGate!==undefined&&publicGate!=="true"&&publicGate!=="false")throw new Error("PUBLIC_MANAGED_TRANSFER must be true or false");
+  let publicManagedTransfer:AppConfig["publicManagedTransfer"];
+  if(publicGate==="true") {
+    if(nodeEnv!=="production"||plcDirectoryUrl!=="https://plc.directory"||!publicPlcAuthority||
+      publicPlcAuthority.providerOperators.length!==2||pocManagedTransfer||
+      ["POC_ACCOUNT_ACCESS","POC_SELF_SERVICE_TRANSFER","POC_SELF_SERVICE_RETURN","POC_SELF_SERVICE_ONBOARDING","POC_SCHEMA_REHEARSAL"]
+        .some(name=>environment[name]==="true"))throw new Error("Public managed transfer requires production strict public authority, both provider operators, and no private-POC gates");
+    const monitorOrigin=required(environment,"PLC_MANAGED_MONITOR_ORIGIN"),monitorPublicKey=required(environment,"PLC_MANAGED_MONITOR_PUBLIC_KEY");
+    if(!canonicalPlcReadOrigin(monitorOrigin)||new URL(monitorOrigin).hostname===publicOriginUrl.hostname||
+      !/^did:key:z[1-9A-HJ-NP-Za-km-z]{1,128}$/.test(monitorPublicKey))throw new Error("Public managed transfer requires a pinned independent HTTPS monitor and Ed25519 key");
+    const key=base58btc.decode(monitorPublicKey.slice(8));
+    if(key.length!==34||key[0]!==0xed||key[1]!==1)throw new Error("Managed monitor key must be Ed25519");
+    publicManagedTransfer={monitorOrigin,monitorPublicKey};
+  } else if(environment.PLC_MANAGED_MONITOR_ORIGIN||environment.PLC_MANAGED_MONITOR_PUBLIC_KEY) {
+    throw new Error("Managed monitor declarations require PUBLIC_MANAGED_TRANSFER=true");
+  }
   if(pocManagedTransfer&&(plcDirectoryUrl==="https://plc.directory"||publicPlcAuthority||
     environment.POC_ACCOUNT_ACCESS!=="true"||environment.POC_SELF_SERVICE_TRANSFER!=="true"||
     environment.POC_SELF_SERVICE_RETURN!=="true")) {
@@ -138,6 +158,7 @@ export function loadConfig(environment: Environment = Bun.env): AppConfig {
     databaseUrl,
     keyEncryptionKey,
     pocManagedTransfer,
+    ...(publicManagedTransfer?{publicManagedTransfer}:{}),
     ...(publicPlcAuthority ? { publicPlcAuthority } : {}),
   };
 }

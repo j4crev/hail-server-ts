@@ -335,6 +335,36 @@ It is disabled by default and requires `POC_ACCOUNT_ACCESS`,
 Its reads are retained as `poc-local`; this flag cannot enable public-PLC or
 strict-public operation.
 
+The separate `PUBLIC_MANAGED_TRANSFER` runtime is **disabled by default**. It
+requires `NODE_ENV=production`, `PLC_DIRECTORY_URL=https://plc.directory`,
+`PLC_AUTHORITY_PROFILE=strict-public-v1`, two reviewed `PLC_PUBLIC_READERS`, and
+both source/destination operators in `PLC_PROVIDER_OPERATORS`. All private account
+access, onboarding, transfer, return and schema-rehearsal gates must be off.
+`PLC_MANAGED_MONITOR_ORIGIN` and `PLC_MANAGED_MONITOR_PUBLIC_KEY` pin the independent
+HTTPS monitor and its Ed25519 `did:key`; orphan declarations fail startup. Enabling
+this flag is not permission to skip the remaining operational/public canary gates.
+
+This runtime wires owner-recovery account access, managed APIs/routes/workers,
+fresh two-reader resolution, and the existing full public cutover evidence policy.
+Public staging rejects private registration history before submission. Activation
+requires a reviewed bootstrap v2 monitor report, independent matching readers,
+exact destination roles/state, and retained evidence selected/sealed atomically
+with ownership. Missing, stale, invalid, gapped or disagreeing evidence blocks
+activation; an activated retry verifies retained evidence and current authority.
+
+Public completion uses the same `/transfers/managed-completions` endpoint in two
+phases. Without `monitor`, it stages/submits only the exact approved operation and
+returns `phase: awaiting-monitor`; the source stays fenced. After the independent
+monitor observes that operation, retry the same snapshot/approval/operation with
+`monitor: {payload, signature}`. The pinned report may be refreshed without
+changing the owner-approved artifacts. The private endpoint still accepts only
+the original three-field request and never public monitor evidence.
+
+All implementation proof uses injected readers/PLC transport, including strict
+`A → B → A`, submission ambiguity, retries, monitor refusals, reader outages,
+history/Grant continuity, credential revocation and generation fencing. This is
+not public PLC evidence; no deployment flag or registry was switched.
+
 ### Never-active post-export recovery (internal migration 39)
 
 `PrivatePocTransferAbandonment` implements independent owner-recovery approvals,

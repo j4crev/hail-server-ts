@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { loadConfig } from "../src/config.js";
+import {base58btc} from "multiformats/bases/base58";
+import {createPublicManagedRuntime} from "../src/migration/public-managed-runtime.js";
 
 const validEnvironment = {
   NODE_ENV: "test",
@@ -59,6 +61,24 @@ describe("loadConfig", () => {
     expect(()=>loadConfig({...enabled,POC_SELF_SERVICE_RETURN:"false"})).toThrow(/requires account access/);
     expect(()=>loadConfig({...publicEnvironment,POC_MANAGED_TRANSFER:"true",POC_ACCOUNT_ACCESS:"true",
       POC_SELF_SERVICE_TRANSFER:"true",POC_SELF_SERVICE_RETURN:"true"})).toThrow(/non-public PLC/);
+  });
+
+  it("defaults public managed transfer off and rejects incompatible production declarations before I/O",()=>{
+    const publicManaged={...publicEnvironment,NODE_ENV:"production",PUBLIC_MANAGED_TRANSFER:"true",
+      PLC_PROVIDER_OPERATORS:'["provider-a","provider-b"]',PLC_MANAGED_MONITOR_ORIGIN:"https://monitor.example.com",
+      PLC_MANAGED_MONITOR_PUBLIC_KEY:`did:key:${base58btc.encode(new Uint8Array([0xed,1,...new Uint8Array(32)]))}`};
+    expect(loadConfig(publicEnvironment).publicManagedTransfer).toBeUndefined();
+    expect(loadConfig(publicManaged).publicManagedTransfer?.monitorOrigin).toBe(publicManaged.PLC_MANAGED_MONITOR_ORIGIN);
+    for(const override of [{PUBLIC_MANAGED_TRANSFER:"yes"},{NODE_ENV:"test"},{PLC_DIRECTORY_URL:"http://plc:2582"},
+      {PLC_AUTHORITY_PROFILE:"poc"},{PLC_PROVIDER_OPERATORS:'["provider-a"]'},{PLC_MANAGED_MONITOR_ORIGIN:validEnvironment.PUBLIC_ORIGIN},
+      {PLC_MANAGED_MONITOR_PUBLIC_KEY:"did:key:zInvalid"},...[
+        "POC_MANAGED_TRANSFER","POC_ACCOUNT_ACCESS","POC_SELF_SERVICE_TRANSFER","POC_SELF_SERVICE_RETURN","POC_SELF_SERVICE_ONBOARDING","POC_SCHEMA_REHEARSAL",
+      ].map(name=>({[name]:"true"}))])expect(()=>loadConfig({...publicManaged,...override})).toThrow();
+    expect(()=>loadConfig({...publicManaged,PUBLIC_MANAGED_TRANSFER:"false"})).toThrow(/declarations/);
+    expect(createPublicManagedRuntime(loadConfig(publicEnvironment),null as never,null as never,null as never,null as never,
+      null as never,null as never)).toBeUndefined();
+    expect(()=>createPublicManagedRuntime({...loadConfig(publicManaged),plcDirectoryUrl:"http://plc:2582"},null as never,
+      null as never,null as never,null as never,null as never,null as never)).toThrow(/strict public/);
   });
 
   it("requires the Hail service base to belong to the public origin", () => {

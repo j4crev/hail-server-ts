@@ -41,6 +41,9 @@ export class ManagedMigrationStageService {
     const manifest = validateManagedTransferManifest(snapshot.bytes);
     if(manifest.tables.managed_custody_evidence[0]?.verification_mode!==this.verificationMode)
       throw new Error("Managed snapshot authority profile is not enabled here");
+    if(this.verificationMode==="strict-public-v1"&&(!manifest.tables.plc_operation_evidence.length||
+      manifest.tables.plc_operation_evidence.some(row=>row.registry_origin!=="https://plc.directory")))
+      throw new Error("Public managed staging requires canonical registration evidence; private records cannot be relabeled");
     const retained=(await this.sql<{manifest_bytes:Uint8Array;manifest_digest:Uint8Array;signature:Uint8Array;
       source_messaging_public_key:string;user_consent_payload:Uint8Array;user_consent_signature:Uint8Array;
       signed_plc_operation_bytes:Uint8Array;state:string;custody_profile:string}[]>`

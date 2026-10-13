@@ -18,6 +18,9 @@ import {parseJsonWithoutDuplicateKeys} from "../discovery/strict-json.js";
 import {validateManagedTransferManifest,type ManagedTransferManifest} from "./managed-snapshot.js";
 import {signActivationReceipt,type SignedActivationReceipt} from "./activation-receipt.js";
 import {replaceRetiredManagedProjection} from "./return.js";
+import type {PortableCutoverGate} from "./cutover-gate.js";
+import type {SignedMonitorAttestation} from "./monitor-attestation.js";
+import {requirePublicCutoverEvidence} from "./public-cutover-evidence.js";
 
 type Row=Record<string,unknown>;
 const sha=(value:Uint8Array)=>new Uint8Array(createHash("sha256").update(value).digest());
@@ -39,7 +42,12 @@ interface PreparedRow {
 export class ManagedMigrationActivation {
   constructor(private readonly sql:SQL,private readonly encryptor:KeyEncryptor,private readonly resolver:HailDidResolver,
     private readonly verifier:AddressVerificationService,private readonly serviceBase:string,private readonly registryOrigin:string,
-    private readonly verificationMode:"strict-public-v1"|"poc-local"="strict-public-v1",private readonly now=()=>new Date()) {}
+    private readonly verificationMode:"strict-public-v1"|"poc-local"="strict-public-v1",private readonly now=()=>new Date(),
+    private readonly gate?:Pick<PortableCutoverGate,"assess">) {
+    if(verificationMode==="strict-public-v1"&&(registryOrigin!=="https://plc.directory"||!gate))
+      throw new Error("Public managed activation requires the canonical registry and public cutover gate");
+    if(verificationMode==="poc-local"&&registryOrigin==="https://plc.directory")throw new Error("Private managed activation cannot use the public registry");
+  }
 
   async issueReceipt(transferId:string):Promise<SignedActivationReceipt> {
     const row=(await this.sql<{state:string;did:string;manifest_bytes:Uint8Array;manifest_digest:Uint8Array;
@@ -48,6 +56,8 @@ export class ManagedMigrationActivation {
         signed_plc_operation_bytes,activated_at FROM pending_migration_imports WHERE transfer_id=${transferId}`)[0];
     if(!row||row.state!=="active"||!row.activated_at)throw new Error("Only an active managed import may acknowledge destination takeover");
     const manifest=validateManagedTransferManifest(row.manifest_bytes);
+    if(this.verificationMode==="strict-public-v1")await requirePublicCutoverEvidence(this.sql,{transferId,did:row.did,
+      manifestDigest:row.manifest_digest,operationBytes:row.signed_plc_operation_bytes,activatedAt:row.activated_at});
     if(manifest.transferId!==transferId||manifest.did!==row.did||manifest.destinationServiceBase!==this.serviceBase||
       !same(sha(row.manifest_bytes),row.manifest_digest))throw new Error("Active managed import differs from its retained snapshot");
     const resolved=await this.confirmCurrent(manifest,row.signed_plc_operation_bytes);
@@ -65,7 +75,7 @@ export class ManagedMigrationActivation {
     await importEd25519PrivateKey(plaintext));} finally {plaintext.fill(0);}
   }
 
-  async activate(transferId:string) {
+  async activate(transferId:string,signedMonitor?:SignedMonitorAttestation) {
     const pending=(await this.sql<{state:string;did:string;manifest_bytes:Uint8Array;manifest_digest:Uint8Array;
       destination_address:string;destination_binding_cose:Uint8Array;destination_binding_digest:Uint8Array;
       signed_plc_operation_bytes:Uint8Array;custody_profile:string}[]>`
@@ -89,12 +99,16 @@ export class ManagedMigrationActivation {
         !keys.some(key=>key.role==="hail-messaging"&&key.public_key===manifest.destinationMessagingPublicKey))
         throw new Error("Activated managed import no longer owns its exact account state");
       await this.confirmCurrent(manifest,pending.signed_plc_operation_bytes);
+      if(this.verificationMode==="strict-public-v1")await this.issueReceipt(transferId);
       return {did:manifest.did,accountId:manifest.accountId,generation:manifest.sourceGeneration+1};
     }
     if(!pending||pending.state!=="staged"||pending.custody_profile!=="managed")throw new Error("No inactive managed import to materialize");
     const manifest=validateManagedTransferManifest(pending.manifest_bytes);
     if(manifest.transferId!==transferId||manifest.did!==pending.did||manifest.destinationServiceBase!==this.serviceBase||
       !same(sha(pending.manifest_bytes),pending.manifest_digest))throw new Error("Managed import differs from its retained snapshot");
+    const assessment=this.gate?await this.gate.assess(transferId,signedMonitor):undefined;
+    if(this.verificationMode==="strict-public-v1"&&(!assessment?.eligible||!assessment.evidenceDigest))
+      throw new Error("Managed public cutover is not eligible");
     const resolved=await this.confirmCurrent(manifest,pending.signed_plc_operation_bytes);
     const prepared=(await this.sql<PreparedRow[]>`SELECT state,custody_profile,rotation_public_key,rotation_private_ciphertext,rotation_nonce,
       identity_public_key,identity_private_ciphertext,identity_nonce,messaging_public_key,messaging_private_ciphertext,messaging_nonce
@@ -143,6 +157,12 @@ export class ManagedMigrationActivation {
         !reservation?.reserved_account_id||reservation.canonical_address!==pending.destination_address||reservation.state!=="submitted")
         throw new Error("Managed staging authority changed before materialization");
       reservedId=reservation.reserved_account_id;
+      if(this.verificationMode==="strict-public-v1") {
+        const evidence=await requirePublicCutoverEvidence(tx,{transferId,did:manifest.did,manifestDigest:pending.manifest_digest,
+          operationBytes:pending.signed_plc_operation_bytes,digest:assessment!.evidenceDigest,activatedAt:null});
+        const age=this.now().getTime()-evidence.verified_at.getTime();
+        if(age<0||age>30_000)throw new Error("Managed public cutover evidence expired before materialization");
+      }
       const accounts=await tx<{id:string;did:string|null}[]>`SELECT id,did FROM provider_accounts
         WHERE did=${manifest.did} OR id=${manifest.accountId} FOR UPDATE`;
       const returning=accounts.length>0;

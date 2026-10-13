@@ -7,11 +7,13 @@ import { canonicalPlcReadOrigin, type IndependentPlcObserver } from "../plc/obse
 export { createIndependentPlcObserver, type IndependentPlcObserver } from "../plc/observers.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { validateTransferManifest } from "./transfer.js";
+import { validateManagedTransferManifest } from "./managed-snapshot.js";
 import { verifyMonitorAttestation, type SignedMonitorAttestation } from "./monitor-attestation.js";
 import { encodePublicCutoverEvidence, evidenceHash, requirePublicCutoverEvidence } from "./public-cutover-evidence.js";
 import { encode as encodeDagCbor } from "@ipld/dag-cbor";
 import type { HailValue } from "@hailproto/codec";
 import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js";
+import {withAbort} from "../plc/client.js";
 
 export interface CutoverAssessment {
   eligible: boolean;
@@ -27,6 +29,7 @@ export class PortableCutoverGate {
     private readonly observers: readonly [IndependentPlcObserver, IndependentPlcObserver],
     private readonly now: () => Date = () => new Date(),
     private readonly providerOperators: readonly string[] = [],
+    private readonly managedMonitor?: {monitorOrigin:string;monitorPublicKey:string},
   ) {}
 
   async assess(transferId: string, signedMonitor?: SignedMonitorAttestation): Promise<CutoverAssessment> {
@@ -41,12 +44,16 @@ export class PortableCutoverGate {
     if (!pending || pending.state !== "staged" || !pending.signed_plc_operation_bytes) {
       throw new Error("Cutover requires a staged inactive user-signed PLC update");
     }
-    const manifest = validateTransferManifest(pending.manifest_bytes);
+    const manifest = this.managedMonitor ? validateManagedTransferManifest(pending.manifest_bytes) : validateTransferManifest(pending.manifest_bytes);
     const signedOperation = def.operation.parse(parseJsonWithoutDuplicateKeys(
       new TextDecoder("utf-8", { fatal: true }).decode(pending.signed_plc_operation_bytes)));
     const expectedCid = (await cidForCbor(signedOperation)).toString();
     if (manifest.did !== pending.did || manifest.transferId !== transferId) throw new Error("Cutover import correlation failed");
-    const custody = manifest.tables.portable_custody_evidence[0]!;
+    const custody = "custodyProfile" in manifest && manifest.custodyProfile==="managed" ? {
+      monitor_verification_mode:manifest.tables.managed_custody_evidence[0]?.verification_mode==="strict-public-v1"?"independent":"poc-local",
+      monitor_origin:this.managedMonitor!.monitorOrigin,monitor_public_key:this.managedMonitor!.monitorPublicKey,
+      user_identity_public_key:manifest.destinationIdentityPublicKey,user_recovery_public_key:manifest.ownerRecoveryPublicKey,
+    } : (manifest as ReturnType<typeof validateTransferManifest>).tables.portable_custody_evidence[0]!;
     if (custody.monitor_verification_mode !== "independent") {
       throw new Error("Public cutover requires independent monitor custody evidence");
     }
@@ -69,7 +76,7 @@ export class PortableCutoverGate {
       new URL(this.observers[0].origin).hostname === new URL(this.observers[1].origin).hostname) {
       throw new Error("Cutover requires two independently configured HTTPS PLC readers and provider operator declarations");
     }
-    const observations = await Promise.all(this.observers.map(async (observer) => {
+    const observations = await withAbort(Promise.all(this.observers.map(async (observer) => {
       const [resolved, audit] = await Promise.all([
         observer.resolver.resolve(manifest.did), observer.audit(manifest.did),
       ]);
@@ -97,7 +104,7 @@ export class PortableCutoverGate {
         throw new Error("Mirror does not confirm the exact portable destination state");
       }
       return { checked, document: structuredClone(resolved.evidence.document), bootstrapState };
-    }));
+    })),AbortSignal.timeout(15_000));
     if (!isDeepStrictEqual(observations[0]!.checked, observations[1]!.checked) || report.operation_cid !== observations[0]!.checked.operationCid ||
       observations[0]!.checked.operationCid !== expectedCid) {
       throw new Error("Cutover witnesses disagree on the current PLC operation");
@@ -105,7 +112,7 @@ export class PortableCutoverGate {
     const operationCid = observations[0]!.checked.operationCid;
     const attestationDigest = evidenceHash(monitor.payloadBytes), manifestDigest = evidenceHash(pending.manifest_bytes);
     const verifiedAt = this.now();
-    if (verifiedAt.getTime() < now.getTime()) throw new Error("PLC verification clock moved backwards");
+    if (!Number.isFinite(now.getTime())||verifiedAt.getTime() < now.getTime()||verifiedAt.getTime()-now.getTime()>15_000) throw new Error("PLC verification clock/deadline is invalid");
     await verifyMonitorAttestation(monitor, custody.monitor_public_key as string, Math.floor(verifiedAt.getTime() / 1000), 300);
     return this.sql.begin(async (tx): Promise<CutoverAssessment> => {
       // Same import-first order as activation/invalidation. A read paused across

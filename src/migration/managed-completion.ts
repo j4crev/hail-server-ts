@@ -13,12 +13,15 @@ const canonical=(value:string)=>{const bytes=decodeBase64Url(value);if(encodeBas
 export class ManagedMigrationCompletion {
   constructor(private readonly stage:Pick<ManagedMigrationStageService,"stage">,
     private readonly plc:Pick<ManagedMigrationPlcSubmission,"submit">,
-    private readonly activation:Pick<ManagedMigrationActivation,"activate"|"issueReceipt">) {}
+    private readonly activation:Pick<ManagedMigrationActivation,"activate"|"issueReceipt">,
+    private readonly publicProfile=false) {}
 
   async complete(input:unknown) {
-    if(!input||typeof input!=="object"||Array.isArray(input)||Object.keys(input).length!==3||
+    if(!input||typeof input!=="object"||Array.isArray(input)||
+      Object.keys(input).length!==(this.publicProfile&&"monitor" in input?4:3)||
       !("snapshot" in input)||!("approval" in input)||!("operation" in input)||typeof input.operation!=="string")
       throw new Error("Managed completion requires exact snapshot, approval and operation");
+    const monitor=this.publicProfile&&"monitor" in input?decodeSignedRecord(input.monitor):undefined;
     const container=input.snapshot;
     if(!container||typeof container!=="object"||Array.isArray(container)||Object.keys(container).sort().join(",")!==
       "digest,manifest,signature,sourceMessagingPublicKey,type,version"||!("type" in container)||container.type!=="hail.managed-migration-transfer"||
@@ -35,7 +38,9 @@ export class ManagedMigrationCompletion {
     const operation=def.operation.parse(parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(operationBytes)));
     const operationCid=(await cidForCbor(operation)).toString();
     if(await this.plc.submit(manifest.transferId)!==operationCid)throw new Error("Configured PLC retained another operation");
-    const active=await this.activation.activate(manifest.transferId),receipt=await this.activation.issueReceipt(manifest.transferId);
+    if(this.publicProfile&&!monitor)return {type:"hailp.managed-transfer-completion",version:1,did:manifest.did,accountId:manifest.accountId,
+      transferId:manifest.transferId,operationCid,phase:"awaiting-monitor"};
+    const active=await this.activation.activate(manifest.transferId,monitor),receipt=await this.activation.issueReceipt(manifest.transferId);
     return {type:"hailp.managed-transfer-completion",version:1,did:active.did,accountId:active.accountId,
       transferId:manifest.transferId,generation:active.generation,operationCid,phase:"active",receipt:encodeSignedRecord(receipt)};
   }

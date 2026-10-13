@@ -66,6 +66,7 @@ import {ManagedMigrationStageService} from "./migration/managed-stage.js";
 import {ManagedMigrationPlcSubmission} from "./migration/managed-plc-submission.js";
 import {ManagedMigrationActivation} from "./migration/managed-activation.js";
 import {ManagedMigrationCompletion} from "./migration/managed-completion.js";
+import {createPublicManagedRuntime} from "./migration/public-managed-runtime.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -109,23 +110,26 @@ if (schemaRehearsal && (config.plcDirectoryUrl !== "http://plc:2582" ||
 
 await database.migrate();
 
-const managedResolver=config.pocManagedTransfer?new PrivatePocManagedResolver(resolver):undefined;
-const managedAuthorization=managedResolver?new ManagedTransferAuthorization(database.sql,managedResolver,
-  config.hailServiceBase,onboardingRepository,encryptor):undefined;
-const managedDelivery=managedResolver?new ManagedTransferDelivery(database.sql,managedResolver,config.hailServiceBase,
-  transport.fetch,transport.validateTarget):undefined;
-const managedFencePublisher=managedResolver?new ManagedTransferFencePublisher(database.sql,managedResolver,targetKeys,
-  transport.fetch,transport.validateTarget):undefined;
-const managedFence=managedResolver?new ManagedMigrationFenceService(database.sql,managedResolver,config.hailServiceBase,
-  undefined,"poc-local"):undefined;
-const managedExporter=managedResolver?new ManagedMigrationExportService(database.sql,onboardingRepository,encryptor,
-  managedResolver,config.hailServiceBase,undefined,"poc-local"):undefined;
-const managedActivation=managedResolver?new ManagedMigrationActivation(database.sql,encryptor,managedResolver,
+const publicManaged=createPublicManagedRuntime(config,database.sql,plc,onboardingRepository,encryptor,transport,
+  new AddressVerifier(plc,transport.fetch,transport.validateTarget,undefined,resolver));
+const managedTargetKeys=publicManaged?.targetKeys??targetKeys;
+const managedResolver=publicManaged?.resolver??(config.pocManagedTransfer?new PrivatePocManagedResolver(resolver):undefined);
+const managedAuthorization=publicManaged?.authorization??(managedResolver?new ManagedTransferAuthorization(database.sql,managedResolver,
+  config.hailServiceBase,onboardingRepository,encryptor):undefined);
+const managedDelivery=publicManaged?.delivery??(managedResolver?new ManagedTransferDelivery(database.sql,managedResolver,config.hailServiceBase,
+  transport.fetch,transport.validateTarget):undefined);
+const managedFencePublisher=publicManaged?.fencePublisher??(managedResolver?new ManagedTransferFencePublisher(database.sql,managedResolver,managedTargetKeys,
+  transport.fetch,transport.validateTarget):undefined);
+const managedFence=publicManaged?.fence??(managedResolver?new ManagedMigrationFenceService(database.sql,managedResolver,config.hailServiceBase,
+  undefined,"poc-local"):undefined);
+const managedExporter=publicManaged?.exporter??(managedResolver?new ManagedMigrationExportService(database.sql,onboardingRepository,encryptor,
+  managedResolver,config.hailServiceBase,undefined,"poc-local"):undefined);
+const managedActivation=publicManaged?.activation??(managedResolver?new ManagedMigrationActivation(database.sql,encryptor,managedResolver,
   new AddressVerifier(plc,transport.fetch,transport.validateTarget,undefined,managedResolver),config.hailServiceBase,
-  config.plcDirectoryUrl,"poc-local"):undefined;
-const managedCompletion=managedResolver&&managedActivation?new ManagedMigrationCompletion(
+   config.plcDirectoryUrl,"poc-local"):undefined);
+const managedCompletion=publicManaged?.completion??(managedResolver&&managedActivation?new ManagedMigrationCompletion(
   new ManagedMigrationStageService(database.sql,managedResolver,targetKeys,config.hailServiceBase,undefined,"poc-local"),
-  new ManagedMigrationPlcSubmission(database.sql,plc,managedResolver,config.hailServiceBase),managedActivation):undefined;
+   new ManagedMigrationPlcSubmission(database.sql,plc,managedResolver,config.hailServiceBase),managedActivation):undefined);
 const transferWorker = new TransferDeliveryWorker(database.sql, invitationDelivery, finalTransferPublisher,
   managedDelivery,managedFencePublisher);
 
@@ -217,7 +221,7 @@ const app = createApp(config, schemaRehearsal ? {
   checkReadiness,
 } : {
   servingSql:database.sql,
-  ...(process.env.POC_ACCOUNT_ACCESS === "true" ?
+  ...(process.env.POC_ACCOUNT_ACCESS === "true" || publicManaged ?
     { accountAccess: { access: new AccountAccess(database.sql, resolver, config.publicOrigin), sql: database.sql } } : {}),
   ...(process.env.PUBLIC_SELF_SERVICE_ONBOARDING === "true" ? (()=>{
     if(config.nodeEnv!=="production"||!config.publicPlcAuthority)throw new Error("Public self-service onboarding requires production strict public PLC authority");
@@ -280,8 +284,8 @@ const app = createApp(config, schemaRehearsal ? {
     onboardingRepository, new KeyEncryptor(config.keyEncryptionKey)),
   transferCancellationReceiver: new TransferCancellationReceiver(database.sql, resolver, config.hailServiceBase),
   ...(managedResolver&&managedFencePublisher&&managedFence&&managedCompletion?{
-    managedTransferInvitationReceiver:new ManagedTransferInvitationReceiver(database.sql,managedResolver,targetKeys),
-    managedTransferAddressReservation:new ManagedTransferAddressReservation(database.sql,managedResolver,targetKeys,transferRateLimit),
+    managedTransferInvitationReceiver:new ManagedTransferInvitationReceiver(database.sql,managedResolver,managedTargetKeys),
+    managedTransferAddressReservation:new ManagedTransferAddressReservation(database.sql,managedResolver,managedTargetKeys,transferRateLimit),
     managedTransferFencePublisher:managedFencePublisher,managedMigrationFence:managedFence,
     managedMigrationCompletion:managedCompletion}:{}),
   ...(transferCompletion?{transferCompletion}:{}),
