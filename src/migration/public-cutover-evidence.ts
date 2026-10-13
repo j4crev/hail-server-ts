@@ -1,5 +1,6 @@
 import { decodeDeterministic, type HailValue } from "@hailproto/codec";
 import type { SQL } from "bun";
+import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js";
 import { verifyMonitorAttestation } from "./monitor-attestation.js";
 import { PUBLIC_EVIDENCE_LIMITS, evidenceHash, encodePublicEvidence } from "../plc/read-evidence.js";
 export { PUBLIC_EVIDENCE_LIMITS, evidenceHash } from "../plc/read-evidence.js";
@@ -30,7 +31,7 @@ export async function requirePublicCutoverEvidence(sql: SQL, expected: {
   }
   const bundle = decodeDeterministic(row.bundle_bytes, PUBLIC_EVIDENCE_LIMITS) as Record<string, HailValue>;
   const monitor = bundle.monitor as Record<string, HailValue>;
-  if (bundle.type !== "hail.public-cutover-evidence" || bundle.version !== 1 || bundle.policy !== "hail.plc-read-evidence-v1" ||
+  if (bundle.type !== "hail.public-cutover-evidence" || bundle.version !== 1 || bundle.policy !== PLC_READ_EVIDENCE_POLICY_VERSION ||
     bundle.transfer_id !== expected.transferId || bundle.did !== expected.did || bundle.operation_cid !== row.operation_cid ||
     bundle.verified_at !== row.verified_at.toISOString() || !(bundle.manifest_digest instanceof Uint8Array) ||
     !same(bundle.manifest_digest, expected.manifestDigest) || !(bundle.signed_operation_bytes instanceof Uint8Array) ||

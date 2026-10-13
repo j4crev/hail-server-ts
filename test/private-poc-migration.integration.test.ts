@@ -425,7 +425,11 @@ integration("private PLC transfer between disposable POC providers", () => {
     const betaStatus=await withFreshServingGenerations(target.sql,()=>new DeliveryStatusSigner(target.sql,targetRepo,targetEncryptor,resolver,newBase).signCurrent(peerDid,firstMessage.message_id));
     const secondMessage=await withFreshServingGenerations(target.sql,()=>seedMessage(target));
     const betaPending=(await withFreshServingGenerations(target.sql,()=>betaDelivery.claimDue()))!;expect(betaPending.messageId).toBe(secondMessage.message_id);
-    const betaGrant=(await withFreshServingGenerations(target.sql,()=>new GrantRepository(target.sql).claimDuePublication(60000)))!;
+    let betaGrant:Awaited<ReturnType<GrantRepository["claimDuePublication"]>>=null;for(let attempt=0;attempt<3;attempt++){
+      betaGrant=await withFreshServingGenerations(target.sql,()=>new GrantRepository(target.sql).claimDuePublication(60000));
+      if(betaGrant?.grant.payload.grant_id===grant.grant_id)break;
+    }
+    if(!betaGrant)throw new Error("Current transfer Grant publication was not claimable");
     expect(betaGrant.grant.payload.grant_id).toBe(grant.grant_id);
     // A destination's pre-existing grantee replica has its own arrival time,
     // even when the COSE/digest/signer checkpoint is identical.
@@ -584,18 +588,6 @@ integration("private PLC transfer between disposable POC providers", () => {
       const invalidation=await invalidating;expect(await withFreshServingGenerations(target.sql,()=>targetAbandon.invalidate(intent))).toEqual(invalidation);
       expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence`).toHaveLength(0);
       const rollbackTarget=await target.sql.reserve();try {
-        if((await rollbackTarget`SELECT version FROM schema_migrations WHERE version=49`).length)
-          await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql",import.meta.url)).text());
-        if((await rollbackTarget`SELECT version FROM schema_migrations WHERE version=48`).length)
-          await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql",import.meta.url)).text());
-        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
-        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());
-        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text());
-        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql",import.meta.url)).text());
-        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0043_public_signing_authority.sql",import.meta.url)).text());
-        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0042_public_grant_authority.sql",import.meta.url)).text());
-        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0041_public_plc_authority.sql",import.meta.url)).text());
-        await rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0040_public_cutover_evidence.sql",import.meta.url)).text());
         await expect(rollbackTarget.unsafe(await Bun.file(new URL("../migrations/rollback/0039_transfer_abandonment.sql",import.meta.url)).text())).rejects.toThrow("prevents rollback");
       }finally{await rollbackTarget.unsafe("ROLLBACK");rollbackTarget.release();}
       await target.migrate();

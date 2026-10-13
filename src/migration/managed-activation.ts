@@ -9,6 +9,7 @@ import {materializedServingGeneration} from "../db/serving.js";
 import type {KeyEncryptor} from "../identity/key-encryption.js";
 import {ed25519PublicKeyFromDidKey} from "../identity/did-key.js";
 import {importEd25519PrivateKey} from "../identity/keys.js";
+import {MANAGED_CUSTODY_PROFILE_VERSION} from "../identity/managed-profile.js";
 import type {AddressVerificationService} from "../onboarding/activation.js";
 import {retainPublicGrantAuthority} from "../plc/grant-authority.js";
 import type {HailDidResolver,PlcResolutionEvidence} from "../plc/resolver.js";
@@ -168,8 +169,9 @@ export class ManagedMigrationActivation {
         ["hail-messaging","ed25519",manifest.destinationMessagingPublicKey,encryptedMessaging],
       ] as const)await tx`INSERT INTO account_keys(account_id,role,algorithm,public_key,encrypted_private_key,encryption_nonce,encryption_version,kek_id)
         VALUES(${manifest.accountId},${role},${algorithm},${publicKey},${material.ciphertext},${material.nonce},1,'poc-v1')`;
-      await tx`INSERT INTO managed_custody_evidence(account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode)
-        VALUES(${manifest.accountId},${manifest.ownerRecoveryPublicKey},${manifest.destinationIdentityPublicKey},${this.verificationMode})`;
+      await tx`INSERT INTO managed_custody_evidence(account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode,managed_profile_version)
+        VALUES(${manifest.accountId},${manifest.ownerRecoveryPublicKey},${manifest.destinationIdentityPublicKey},${this.verificationMode},
+          ${MANAGED_CUSTODY_PROFILE_VERSION})`;
       for(const row of manifest.tables.public_plc_resolution_evidence)await insertImmutable(tx,"public_plc_resolution_evidence",row);
       for(const table of ["plc_operation_evidence","address_bindings","sender_profiles"] as const)
         for(const row of manifest.tables[table])await insert(tx,table,table==="address_bindings"?{...row,selected_at:null}:row);

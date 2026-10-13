@@ -191,6 +191,7 @@ const migrations: readonly Migration[] = [
   { version: 47, name: "managed-provider-migration", url: new URL("../../migrations/0047_managed_provider_migration.sql", import.meta.url) },
   { version: 48, name: "managed-migration-approval", url: new URL("../../migrations/0048_managed_migration_approval.sql", import.meta.url) },
   { version: 49, name: "managed-migration-materialization", url: new URL("../../migrations/0049_managed_migration_materialization.sql", import.meta.url) },
+  { version: 50, name: "managed-profile-version", url: new URL("../../migrations/0050_managed_profile_version.sql", import.meta.url) },
 ];
 
 export class ProviderDatabase {

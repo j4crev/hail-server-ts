@@ -191,9 +191,13 @@ export class GrantService {
     }
     const retained = await this.grants.findCurrentByGrantId(payload.grant_id);
     const historical=await this.grants.findRevisionByGrantId?.(payload.grant_id,payload.revision);
-    if(historical?.localRole==="grantor"&&historical.localAccountId===grantor.id&&Buffer.from(historical.representation).equals(Buffer.from(representation)))return historical;
     if (retained?.localRole === "grantor" && retained.localAccountId === grantor.id &&
       Buffer.from(retained.representation).equals(Buffer.from(representation))) return retained;
+    if(historical?.localRole==="grantor"&&historical.localAccountId===grantor.id&&
+      Buffer.from(historical.representation).equals(Buffer.from(representation))) {
+      if(retained?.payload.status!=="active")throw new UserGrantError(409,"Terminal Grant state supersedes this historical revision");
+      return historical;
+    }
     if (payload.status === "revoked") {
       const current = await this.grants.findCurrentByGrantId(payload.grant_id);
       if (!current || current.localRole !== "grantor" || current.localAccountId !== grantor.id ||

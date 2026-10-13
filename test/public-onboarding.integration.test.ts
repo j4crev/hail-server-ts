@@ -89,22 +89,18 @@ it.skipIf(!process.env.DATABASE_URL)("public owner/managed onboarding seals owne
       await service.activate(prepared.accountId, attestation);
       await service.activate(prepared.accountId, attestation);
       expect((await repository.getAccount(prepared.accountId)).activationVerificationMode).toBe("public");
-      expect(await db.sql`SELECT account_id FROM public_onboarding_evidence WHERE account_id=${prepared.accountId}`).toHaveLength(1);
+      expect(await db.sql`SELECT account_id FROM public_onboarding_evidence WHERE account_id=${prepared.accountId}
+        AND record_version=1 AND read_evidence_policy_version='hail.plc-read-evidence-v1'`).toHaveLength(1);
       expect(await db.sql`SELECT action_type FROM public_signing_authority_evidence WHERE local_account_id=${prepared.accountId} AND action_type='address-binding'`).toHaveLength(1);
-      if (custody === "managed") expect(await db.sql`SELECT account_id FROM managed_custody_evidence WHERE account_id=${prepared.accountId} AND verification_mode='strict-public-v1'`).toHaveLength(1);
+      if (custody === "managed") expect(await db.sql`SELECT account_id FROM managed_custody_evidence WHERE account_id=${prepared.accountId}
+        AND verification_mode='strict-public-v1' AND managed_profile_version='hail-managed-custody-v1'`).toHaveLength(1);
       else expect(await db.sql`SELECT account_id FROM portable_custody_evidence WHERE account_id=${prepared.accountId} AND monitor_verification_mode='independent'`).toHaveLength(1);
       await expect(service.activate(prepared.accountId, { ...attestation, signature: Uint8Array.from(attestation.signature, byte => byte ^ 1) })).rejects.toThrow("changed");
     }
     await expect(db.sql`DELETE FROM public_onboarding_evidence`).rejects.toThrow("immutable");
+    await expect(db.sql`UPDATE managed_custody_evidence SET managed_profile_version='future-profile'`).rejects.toThrow();
     const connection = await db.sql.reserve();
-    try { if ((await connection`SELECT version FROM schema_migrations WHERE version=49`).length)
-        await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql", import.meta.url)).text());
-      if ((await connection`SELECT version FROM schema_migrations WHERE version=48`).length)
-        await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql", import.meta.url)).text());
-      await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql", import.meta.url)).text());
-      await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql", import.meta.url)).text());
-      await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql", import.meta.url)).text());
-      await expect(connection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql", import.meta.url)).text())).rejects.toThrow("prevent rollback"); }
+    try { await expect(connection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql", import.meta.url)).text())).rejects.toThrow("prevent rollback"); }
     finally { await connection.unsafe("ROLLBACK"); connection.release(); }
   } finally {
     await db.close(); await admin.unsafe(`DROP SCHEMA "${schema}" CASCADE`); await admin.close();

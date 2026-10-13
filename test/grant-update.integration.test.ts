@@ -69,8 +69,9 @@ integration("active Grant updates and consent refresh through HTTPS hailp",()=>{
         const raw=new Uint8Array(await crypto.subtle.exportKey("pkcs8",pair.privateKey)),encrypted=await encryptor.encrypt(id,"hail-identity","ed25519",key,raw);raw.fill(0);
         await db.sql`INSERT INTO account_keys (account_id,role,algorithm,public_key,encrypted_private_key,encryption_nonce)
           VALUES (${id},'hail-identity','ed25519',${key},${encrypted.ciphertext},${encrypted.nonce})`;
-        await db.sql`INSERT INTO managed_custody_evidence (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode)
-          VALUES (${id},${vault.vault.recovery.publicDidKey},${key},'poc-local')`;
+        await db.sql`INSERT INTO managed_custody_evidence
+          (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode,managed_profile_version)
+          VALUES (${id},${vault.vault.recovery.publicDidKey},${key},'poc-local','hail-managed-custody-v1')`;
       }else await db.sql`INSERT INTO portable_custody_evidence (account_id,user_recovery_public_key,user_identity_public_key,monitor_origin,monitor_confirmed_at,backup_confirmed_at,monitor_verification_mode)
         VALUES (${id},${vault.vault.recovery.publicDidKey},${key},'https://monitor.example.com',now(),now(),'poc-local')`;
       const credential=await accounts.issue(ownerAddress,false,undefined,["account:read","grants:read","grants:write"]);

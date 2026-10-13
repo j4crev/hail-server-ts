@@ -11,6 +11,7 @@ import { verifyMonitorAttestation, type SignedMonitorAttestation } from "./monit
 import { encodePublicCutoverEvidence, evidenceHash, requirePublicCutoverEvidence } from "./public-cutover-evidence.js";
 import { encode as encodeDagCbor } from "@ipld/dag-cbor";
 import type { HailValue } from "@hailproto/codec";
+import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js";
 
 export interface CutoverAssessment {
   eligible: boolean;
@@ -136,7 +137,7 @@ export class PortableCutoverGate {
       const eligible = true;
       // ponytail: full bundles duplicate repeated read data; share content-addressed blobs if storage volume warrants it.
       const bundleBytes = encodePublicCutoverEvidence({ type: "hail.public-cutover-evidence", version: 1,
-        policy: "hail.plc-read-evidence-v1", registry_origin: "https://plc.directory", transfer_id: transferId,
+        policy: PLC_READ_EVIDENCE_POLICY_VERSION, registry_origin: "https://plc.directory", transfer_id: transferId,
         did: manifest.did, account_id: manifest.accountId, manifest_digest: manifestDigest,
         operation_cid: operationCid, signed_operation_bytes: pending.signed_plc_operation_bytes!,
         first_seen_at: firstSeen.toISOString(), read_started_at: now.toISOString(), verified_at: verifiedAt.toISOString(),
@@ -151,9 +152,10 @@ export class PortableCutoverGate {
       const evidenceDigest = evidenceHash(bundleBytes);
       await tx`INSERT INTO public_cutover_evidence
         (transfer_id, evidence_digest, did, operation_cid, manifest_digest, signed_operation_bytes,
-          monitor_attestation_digest, verified_at, bundle_bytes)
+          monitor_attestation_digest, verified_at, bundle_bytes, record_version, read_evidence_policy_version)
         VALUES (${transferId}, ${evidenceDigest}, ${manifest.did}, ${operationCid}, ${manifestDigest},
-          ${pending.signed_plc_operation_bytes!}, ${attestationDigest}, ${verifiedAt}, ${bundleBytes})
+          ${pending.signed_plc_operation_bytes!}, ${attestationDigest}, ${verifiedAt}, ${bundleBytes}, 1,
+          ${PLC_READ_EVIDENCE_POLICY_VERSION})
         ON CONFLICT (transfer_id, evidence_digest) DO NOTHING`;
       const retained = (await tx<{ bundle_bytes: Uint8Array }[]>`SELECT bundle_bytes FROM public_cutover_evidence
         WHERE transfer_id=${transferId} AND evidence_digest=${evidenceDigest}`)[0];

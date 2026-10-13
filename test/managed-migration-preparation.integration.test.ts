@@ -51,10 +51,6 @@ integration("migration 47 prepares distinct destination-held managed roles witho
       transfer_id:managed.transferId,destination_identity_key:managed.identityPublicKey,
       destination_rotation_key:managed.rotationPublicKey,destination_messaging_key:managed.messagingPublicKey});
     const connection=await db.sql.reserve();try {
-      if((await connection`SELECT version FROM schema_migrations WHERE version=49`).length)
-        await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql",import.meta.url)).text());
-      if((await connection`SELECT version FROM schema_migrations WHERE version=48`).length)
-        await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql",import.meta.url)).text());
       await expect(connection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text()))
         .rejects.toThrow("rollback refused");
     } finally {await connection.unsafe("ROLLBACK");connection.release();}

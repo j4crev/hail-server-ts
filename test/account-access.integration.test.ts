@@ -97,8 +97,9 @@ integration("post-expiry owner account access", () => {
       for(const [role,key,algorithm] of [["plc-rotation",rotation.did(),"p256"],["hail-messaging",messagingKey,"ed25519"],...(mode==="managed"?[["hail-identity",identity,"ed25519"]]:[])])
         await db.sql`INSERT INTO account_keys (account_id,role,algorithm,public_key,encrypted_private_key,encryption_nonce)
           VALUES (${id},${role!},${algorithm!},${key!},${randomBytes(32)},${randomBytes(12)})`;
-      if(mode==="managed")await db.sql`INSERT INTO managed_custody_evidence (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode)
-        VALUES (${id},${vault.vault.recovery.publicDidKey},${identity},'poc-local')`;
+      if(mode==="managed")await db.sql`INSERT INTO managed_custody_evidence
+        (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode,managed_profile_version)
+        VALUES (${id},${vault.vault.recovery.publicDidKey},${identity},'poc-local','hail-managed-custody-v1')`;
       else await db.sql`INSERT INTO portable_custody_evidence (account_id,user_recovery_public_key,user_identity_public_key,monitor_origin,monitor_confirmed_at,backup_confirmed_at,monitor_verification_mode)
         VALUES (${id},${vault.vault.recovery.publicDidKey},${identity},'https://monitor.example.com',now(),now(),'poc-local')`;
       await writeFile(join(directory,`${mode}.vault.json`),JSON.stringify(vault.vault),{mode:0o600});

@@ -10,6 +10,7 @@ import type { SQL } from "bun";
 import { materializedServingGeneration } from "../db/serving.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
 import { generateAccountIdentityKey } from "../identity/keys.js";
+import { MANAGED_CUSTODY_PROFILE_VERSION } from "../identity/managed-profile.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import type { AddressVerificationService } from "../onboarding/activation.js";
 import type { PlcDirectoryClient } from "../plc/client.js";
@@ -169,9 +170,9 @@ export class SameProviderCustodyTransition {
       if(!managed||managed.provider_identity_public_key!==review.oldIdentityKey)throw new Error("Managed custody changed");
       await tx`INSERT INTO custody_transition_preparations (transition_id,account_id,did,direction,state,owner_recovery_public_key,
         old_identity_public_key,new_identity_public_key,previous_operation_cid,expected_state,history_checkpoint_digest,binding_cose,
-        binding_digest,generation_from,generation_to,expires_at) VALUES (${transitionId},${accountId},${review.did},'managed-to-owner','prepared',
+        binding_digest,generation_from,generation_to,expires_at,managed_profile_version) VALUES (${transitionId},${accountId},${review.did},'managed-to-owner','prepared',
         ${review.ownerRecoveryKey},${review.oldIdentityKey},${newIdentityKey},${review.previousOperationCid},(${JSON.stringify(state)}::text)::jsonb,
-        ${checkpoint},${bindingCose},${bindingDigest},${review.generationFrom},${review.generationTo},${expiresAt})`;
+        ${checkpoint},${bindingCose},${bindingDigest},${review.generationFrom},${review.generationTo},${expiresAt},${MANAGED_CUSTODY_PROFILE_VERSION})`;
       for(const {row} of successors)await tx`INSERT INTO custody_transition_grant_successors
         (transition_id,grant_id,predecessor_revision,predecessor_digest,successor_revision,successor_cose,successor_digest,destination_service_base)
         VALUES (${transitionId},${row.grant_id},${row.predecessor_revision},${row.predecessor_digest},${row.successor_revision},${row.successor_cose},
@@ -242,11 +243,11 @@ export class SameProviderCustodyTransition {
       await tx`INSERT INTO custody_transition_preparations (transition_id,account_id,did,direction,state,
         owner_recovery_public_key,old_identity_public_key,new_identity_public_key,previous_operation_cid,expected_state,
         history_checkpoint_digest,binding_cose,binding_digest,encrypted_identity_private_key,identity_encryption_nonce,
-        identity_encryption_version,identity_kek_id,generation_from,generation_to,expires_at)
+        identity_encryption_version,identity_kek_id,generation_from,generation_to,expires_at,managed_profile_version)
         VALUES (${transitionId},${accountId},${account.did},'owner-to-managed','prepared',${portable.user_recovery_public_key},
           ${portable.user_identity_public_key},${generated.didKey},${previousOperationCid},(${JSON.stringify(expectedState)}::text)::jsonb,
           ${checkpoint},${bindingCose},${bindingDigest},${generated.key.ciphertext},${generated.key.nonce},
-          ${generated.key.encryptionVersion},${generated.key.kekId},${generation},${generation+1},${expiresAt})`;
+          ${generated.key.encryptionVersion},${generated.key.kekId},${generation},${generation+1},${expiresAt},${MANAGED_CUSTODY_PROFILE_VERSION})`;
       for(const {row} of successors)await tx`INSERT INTO custody_transition_grant_successors
         (transition_id,grant_id,predecessor_revision,predecessor_digest,successor_revision,successor_cose,successor_digest,destination_service_base)
         VALUES (${transitionId},${row.grant_id},${row.predecessor_revision},${row.predecessor_digest},${row.successor_revision},
@@ -342,8 +343,10 @@ export class SameProviderCustodyTransition {
         await tx`INSERT INTO account_keys (account_id,role,algorithm,public_key,encrypted_private_key,encryption_nonce,encryption_version,kek_id)
           VALUES (${row.account_id},'hail-identity','ed25519',${row.new_identity_public_key},${row.encrypted_identity_private_key},
             ${row.identity_encryption_nonce},${row.identity_encryption_version},${row.identity_kek_id})`;
-        await tx`INSERT INTO managed_custody_evidence (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode)
-          VALUES (${row.account_id},${row.owner_recovery_public_key},${row.new_identity_public_key},'strict-public-v1')`;
+        await tx`INSERT INTO managed_custody_evidence
+          (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode,managed_profile_version)
+          VALUES (${row.account_id},${row.owner_recovery_public_key},${row.new_identity_public_key},'strict-public-v1',
+            ${MANAGED_CUSTODY_PROFILE_VERSION})`;
         retired=portable!.value;
       } else {
         const previous=(await tx<{value:Record<string,unknown>}[]>`SELECT retired_custody_evidence AS value FROM custody_transition_preparations

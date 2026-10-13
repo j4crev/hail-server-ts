@@ -12,6 +12,7 @@ import { canonicalizeHailAddress } from "../identity/address.js";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
 import { generateAccountKeys, importEd25519PrivateKey } from "../identity/keys.js";
+import { MANAGED_CUSTODY_PROFILE_VERSION, PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js";
 import { verifyOnboardingMonitorAttestation, type SignedMonitorAttestation } from "../migration/monitor-attestation.js";
 import { requireFreshPublicAuthority } from "../plc/authority.js";
 import type { PlcDirectoryClient } from "../plc/client.js";
@@ -31,6 +32,7 @@ interface PreparationRow {
   monitor_origin: string;
   monitor_public_key: string;
   custody_profile: "owner-controlled" | "managed";
+  managed_profile_version: typeof MANAGED_CUSTODY_PROFILE_VERSION | null;
   backup_confirmed_at: Date;
   signup_token_hash: Uint8Array | null;
 }
@@ -44,6 +46,7 @@ export interface PublicOnboardingPreparation {
   providerMessagingKey: string;
   sourceServiceBase: string;
   custodyProfile: "owner-controlled" | "managed";
+  managedProfileVersion: typeof MANAGED_CUSTODY_PROFILE_VERSION | null;
   monitorOrigin: string;
   monitorPublicKey: string;
 }
@@ -101,13 +104,15 @@ export class PublicOnboarding {
       }
       await tx`INSERT INTO public_onboarding_preparations (account_id, owner_recovery_public_key,
         owner_identity_public_key, provider_rotation_public_key, provider_messaging_public_key,
-        monitor_origin, monitor_public_key, custody_profile, backup_confirmed_at, signup_token_hash)
+        monitor_origin, monitor_public_key, custody_profile, managed_profile_version, backup_confirmed_at, signup_token_hash)
         VALUES (${accountId}, ${recovery}, ${identity}, ${generated.rotationDidKey}, ${generated.messagingDidKey},
-          ${monitorOrigin}, ${monitorPublicKey}, ${profile}, clock_timestamp(), ${signupHash ?? null})`;
+          ${monitorOrigin}, ${monitorPublicKey}, ${profile}, ${profile === "managed" ? MANAGED_CUSTODY_PROFILE_VERSION : null},
+          clock_timestamp(), ${signupHash ?? null})`;
     });
     return { accountId, address, userRecoveryKey: recovery, userIdentityKey: identity,
       providerRotationKey: generated.rotationDidKey, providerMessagingKey: generated.messagingDidKey,
-      sourceServiceBase: this.serviceBase, custodyProfile: profile, monitorOrigin, monitorPublicKey };
+      sourceServiceBase: this.serviceBase, custodyProfile: profile,
+      managedProfileVersion: profile === "managed" ? MANAGED_CUSTODY_PROFILE_VERSION : null, monitorOrigin, monitorPublicKey };
   }
 
   async register(accountId: string, operationBytes: Uint8Array, bindingCose: Uint8Array): Promise<{ did: string; state: string; operationCid: string }> {
@@ -253,8 +258,9 @@ export class PublicOnboarding {
           did: account.did!, role: "hail-identity", key: prepared.owner_identity_public_key,
           serviceBase: this.serviceBase, representation: binding.cose, evidence: verified.plcEvidence });
         if (prepared.custody_profile === "managed") await tx`INSERT INTO managed_custody_evidence
-          (account_id, owner_recovery_public_key, provider_identity_public_key, verification_mode)
-          VALUES (${accountId}, ${prepared.owner_recovery_public_key}, ${prepared.owner_identity_public_key}, 'strict-public-v1')`;
+          (account_id, owner_recovery_public_key, provider_identity_public_key, verification_mode, managed_profile_version)
+          VALUES (${accountId}, ${prepared.owner_recovery_public_key}, ${prepared.owner_identity_public_key}, 'strict-public-v1',
+            ${MANAGED_CUSTODY_PROFILE_VERSION})`;
         else await tx`INSERT INTO portable_custody_evidence (account_id, user_recovery_public_key,
           user_identity_public_key, monitor_origin, monitor_public_key, monitor_confirmed_at,
           backup_confirmed_at, monitor_verification_mode) VALUES (${accountId}, ${prepared.owner_recovery_public_key},
@@ -262,11 +268,11 @@ export class PublicOnboarding {
           ${now}, ${prepared.backup_confirmed_at}, 'independent')`;
         await tx`INSERT INTO public_onboarding_evidence (account_id, did, operation_cid, genesis_digest,
           binding_digest, plc_evidence_digest, monitor_origin, monitor_public_key, monitor_payload,
-          monitor_signature, monitor_state_digest, monitor_export_sequence, activated_at)
+          monitor_signature, monitor_state_digest, monitor_export_sequence, activated_at, record_version, read_evidence_policy_version)
           VALUES (${accountId}, ${account.did}, ${genesis.operationCid},
             ${new Uint8Array(createHash("sha256").update(genesis.operationBytes).digest())}, ${binding.digest}, ${plcDigest},
             ${prepared.monitor_origin}, ${prepared.monitor_public_key}, ${signed.payloadBytes}, ${signed.signature},
-            ${monitor.bootstrap_state_digest}, ${monitor.export_sequence}, ${now})`;
+            ${monitor.bootstrap_state_digest}, ${monitor.export_sequence}, ${now}, 1, ${PLC_READ_EVIDENCE_POLICY_VERSION})`;
         const activated = await tx`UPDATE provider_accounts AS account SET onboarding_state='active', activated_at=${now},
           activation_binding_digest=${binding.digest}, activation_verification_mode='public', activation_attempt_id=NULL,
           state_version=state_version+1, updated_at=${now} FROM address_bindings AS selected
@@ -285,6 +291,7 @@ export class PublicOnboarding {
     return { accountId: row.account_id, address, userRecoveryKey: row.owner_recovery_public_key,
       userIdentityKey: row.owner_identity_public_key, providerRotationKey: row.provider_rotation_public_key,
       providerMessagingKey: row.provider_messaging_public_key, sourceServiceBase: this.serviceBase,
-      custodyProfile: row.custody_profile, monitorOrigin: row.monitor_origin, monitorPublicKey: row.monitor_public_key };
+      custodyProfile: row.custody_profile, managedProfileVersion: row.managed_profile_version,
+      monitorOrigin: row.monitor_origin, monitorPublicKey: row.monitor_public_key };
   }
 }

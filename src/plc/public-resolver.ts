@@ -5,6 +5,7 @@ import type { SQL } from "bun";
 import type { AppConfig } from "../config.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
+import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js";
 import { assertPublicPlcReaders, createIndependentPlcObserver, type IndependentPlcObserver, type PublicPlcAuthorityConfig } from "./observers.js";
 import { canonicalizeHailServiceBase, PlcHailDidResolver, type HailDidResolver, type ResolvedHailDid } from "./resolver.js";
 import { createPlcDirectoryClient, withAbort } from "./client.js";
@@ -65,8 +66,10 @@ export class VerifiedPublicPlcResolver implements HailDidResolver {
     const digest=evidenceHash(bytes);
     await withAbort(this.sql.begin(async tx=>{
       signal.throwIfAborted();
-      await tx`INSERT INTO public_plc_resolution_evidence(evidence_digest,did,operation_cid,verified_at,bundle_bytes)
-        VALUES(${digest},${did},${first.checked.operationCid},${verifiedAt},${bytes}) ON CONFLICT(evidence_digest) DO NOTHING`;
+      await tx`INSERT INTO public_plc_resolution_evidence
+        (evidence_digest,did,operation_cid,verified_at,bundle_bytes,record_version,read_evidence_policy_version)
+        VALUES(${digest},${did},${first.checked.operationCid},${verifiedAt},${bytes},1,${PLC_READ_EVIDENCE_POLICY_VERSION})
+        ON CONFLICT(evidence_digest) DO NOTHING`;
       const retained=(await tx<{bundle_bytes:Uint8Array}[]>`SELECT bundle_bytes FROM public_plc_resolution_evidence WHERE evidence_digest=${digest}`)[0];
       if(!retained||!Buffer.from(retained.bundle_bytes).equals(Buffer.from(bytes)))throw new Error("Retained public PLC resolution conflicts");
       signal.throwIfAborted();

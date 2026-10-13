@@ -63,7 +63,8 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       encryption_nonce,encryption_version,kek_id) VALUES (${accountId},${key.role},${key.algorithm},${key.publicKey},
       ${key.ciphertext},${key.nonce},${key.encryptionVersion},${key.kekId})`;
     await source.sql`INSERT INTO managed_custody_evidence(account_id,owner_recovery_public_key,provider_identity_public_key,
-      verification_mode) VALUES (${accountId},${owner.did()},${keys.identityDidKey},'poc-local')`;
+      verification_mode,managed_profile_version) VALUES (${accountId},${owner.did()},${keys.identityDidKey},'poc-local',
+        'hail-managed-custody-v1')`;
     const grantId=uuidV7(),grantee=`did:plc:${"f".repeat(24)}`,grantNow=Math.floor(Date.now()/1000),grant:HailGrant={
       type:"hail.grant",version:1,grant_id:grantId,revision:1,previous:null,grantor:did,grantee,
       scope:[{type:"uncategorized"}],status:"active",issued_at:grantNow,updated_at:grantNow,expires_at:null,
@@ -220,6 +221,7 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     expect(manifest).toMatchObject({version:4,custodyProfile:"managed",did,sourceGeneration:1,
       ownerRecoveryPublicKey:owner.did(),sourceIdentityPublicKey:keys.identityDidKey,
       destinationIdentityPublicKey:offer.destination_identity_key});
+    expect(manifest.tables.managed_custody_evidence[0]?.managed_profile_version).toBe("hail-managed-custody-v1");
     expect(manifest.tables.grant_publications).toEqual([expect.objectContaining({grant_id:grantId,revision:1,
       state:"acknowledged",acknowledged_etag:'"grant-v1"'})]);
     const serialized=new TextDecoder().decode(exported.bytes);
@@ -233,6 +235,8 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       .toThrow(/body integrity/);
     expect(invalid(value=>{value.tables.body_authorizations[0].body_digest=`\\x${"00".repeat(32)}`;}))
       .toThrow(/local provenance/);
+    expect(invalid(value=>{value.tables.managed_custody_evidence[0].managed_profile_version="future-profile";}))
+      .toThrow(/custody evidence/);
     expect(invalid(value=>{value.tables.grant_publications[0].lease_token=randomUUID();})).toThrow(/worker lease/);
     const tampered=JSON.parse(new TextDecoder().decode(exported.bytes)) as Record<string,unknown>;
     tampered.historyCheckpointDigest=encodeBase64Url(randomBytes(32));
@@ -358,8 +362,9 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     const bundle=encodeDeterministic({type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",did,
       operation_cid:cutoverCid,verified_at:verifiedAt,witnesses:[{state:destinationState},{state:destinationState}]} as unknown as HailValue),
       evidenceDigest=new Uint8Array(createHash("sha256").update(bundle).digest());
-    await target.sql`INSERT INTO public_plc_resolution_evidence(evidence_digest,did,operation_cid,verified_at,bundle_bytes)
-      VALUES(${evidenceDigest},${did},${cutoverCid},${verifiedAt},${bundle})`;
+    await target.sql`INSERT INTO public_plc_resolution_evidence
+      (evidence_digest,did,operation_cid,verified_at,bundle_bytes,record_version,read_evidence_policy_version)
+      VALUES(${evidenceDigest},${did},${cutoverCid},${verifiedAt},${bundle},1,'hail.plc-read-evidence-v1')`;
     const strictResolver={async resolve(value:string){const result=await resolver.resolve(value);return {...result,evidence:{...result.evidence,
       verification:{profile:"poc-local" as const,digest:encodeBase64Url(evidenceDigest),operationCid:cutoverCid,verifiedAt}}};}};
     const binding=decodeDeterministic((await verifySignedPayload("hail.address-binding",new Uint8Array(staged.destination_binding_cose),
@@ -495,8 +500,9 @@ integration("materializes an exact managed A to B to A round trip across fixed H
       type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",did,operation_cid:returnCid,verified_at:returnVerifiedAt,
       witnesses:[{state:returnState},{state:returnState}]} as unknown as HailValue),
       returnEvidenceDigest=new Uint8Array(createHash("sha256").update(returnBundle).digest());
-    await source.sql`INSERT INTO public_plc_resolution_evidence(evidence_digest,did,operation_cid,verified_at,bundle_bytes)
-      VALUES(${returnEvidenceDigest},${did},${returnCid},${returnVerifiedAt},${returnBundle})`;
+    await source.sql`INSERT INTO public_plc_resolution_evidence
+      (evidence_digest,did,operation_cid,verified_at,bundle_bytes,record_version,read_evidence_policy_version)
+      VALUES(${returnEvidenceDigest},${did},${returnCid},${returnVerifiedAt},${returnBundle},1,'hail.plc-read-evidence-v1')`;
     const returnResolver={async resolve(value:string){const result=await resolver.resolve(value);return {...result,evidence:{...result.evidence,
       verification:{profile:"poc-local" as const,digest:encodeBase64Url(returnEvidenceDigest),operationCid:returnCid,verifiedAt:returnVerifiedAt}}};}};
     const returnStaged=(await source.sql<{destination_binding_cose:Uint8Array;destination_binding_digest:Uint8Array}[]>`

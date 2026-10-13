@@ -6,6 +6,7 @@ import type { SQL } from "bun";
 import { bodyDigest, validateBodyBytes } from "../bodies/service.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
 import { importEd25519PrivateKey } from "../identity/keys.js";
+import { MANAGED_CUSTODY_PROFILE_VERSION } from "../identity/managed-profile.js";
 import type { OnboardingRepository } from "../onboarding/repository.js";
 import { PUBLIC_EVIDENCE_LIMITS } from "../plc/read-evidence.js";
 import { canonicalizeHailServiceBase, type HailDidResolver } from "../plc/resolver.js";
@@ -158,9 +159,11 @@ export function validateManagedTransferManifest(bytes: Uint8Array): ManagedTrans
     throw new Error("Managed destination roles are not fresh from source roles");
   }
   const custody = manifest.tables.managed_custody_evidence;
+  const legacyPrivateProfile = custody[0]?.managed_profile_version === undefined && custody[0]?.verification_mode === "poc-local";
   if (custody.length !== 1 || custody[0]?.account_id !== manifest.accountId ||
     custody[0]?.owner_recovery_public_key !== manifest.ownerRecoveryPublicKey ||
     custody[0]?.provider_identity_public_key !== manifest.sourceIdentityPublicKey ||
+    custody[0]?.managed_profile_version !== MANAGED_CUSTODY_PROFILE_VERSION && !legacyPrivateProfile ||
     !["strict-public-v1","poc-local"].includes(String(custody[0]?.verification_mode))) throw new Error("Managed custody evidence is incomplete");
   for (const table of ["plc_operation_evidence", "address_bindings", "sender_profiles"] as const) {
     if (manifest.tables[table].some((row) => row.account_id !== manifest.accountId)) {

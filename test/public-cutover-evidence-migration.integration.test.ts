@@ -12,6 +12,7 @@ it.skipIf(!process.env.DATABASE_URL)("migration 40 preserves legacy rows/auth an
   const rollback = async () => {
     const connection = await db.sql.reserve();
     try {
+      if((await connection`SELECT version FROM schema_migrations WHERE version=50`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0050_managed_profile_version.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=49`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=48`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql",import.meta.url)).text());
       if((await connection`SELECT version FROM schema_migrations WHERE version=47`).length)await connection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
@@ -82,8 +83,9 @@ it.skipIf(!process.env.DATABASE_URL)("migration 40 preserves legacy rows/auth an
     // Retention is guarded even before activation: an unconsumed verification
     // bundle can be the only record of the observation/signature/accepted state.
     await db.sql`INSERT INTO public_cutover_evidence(transfer_id,evidence_digest,did,operation_cid,manifest_digest,signed_operation_bytes,
-      monitor_attestation_digest,verified_at,bundle_bytes) VALUES(${transfer},${digest},${did},'bafkreifixture',${digest},${bytes},${digest},now(),${bytes})`;
-    await expect(rollback()).rejects.toThrow("prevent rollback");
+      monitor_attestation_digest,verified_at,bundle_bytes,record_version,read_evidence_policy_version)
+      VALUES(${transfer},${digest},${did},'bafkreifixture',${digest},${bytes},${digest},now(),${bytes},1,'hail.plc-read-evidence-v1')`;
+    await expect(rollback()).rejects.toThrow("cannot remove frozen profile versions");
     await expect(db.sql`UPDATE public_cutover_evidence SET bundle_bytes=${bytes}`).rejects.toThrow("immutable");
     await expect(db.sql`DELETE FROM public_cutover_evidence`).rejects.toThrow("immutable");
     await expect(db.sql`TRUNCATE public_cutover_evidence CASCADE`).rejects.toThrow("immutable");

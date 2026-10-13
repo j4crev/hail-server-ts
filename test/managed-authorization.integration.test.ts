@@ -29,7 +29,8 @@ integration("durably admits one exact owner-authorized managed transfer without 
       encryption_nonce,encryption_version,kek_id) VALUES (${accountId},${key.role},${key.algorithm},${key.publicKey},
       ${key.ciphertext},${key.nonce},${key.encryptionVersion},${key.kekId})`;
     await db.sql`INSERT INTO managed_custody_evidence(account_id,owner_recovery_public_key,provider_identity_public_key,
-      verification_mode) VALUES (${accountId},${owner.did()},${keys.identityDidKey},'strict-public-v1')`;
+      verification_mode,managed_profile_version) VALUES (${accountId},${owner.did()},${keys.identityDidKey},'strict-public-v1',
+        'hail-managed-custody-v1')`;
     const resolver={async resolve(value:string){if(value!==did)throw new Error("unknown DID");return {did,
       identityDidKey:keys.identityDidKey,messagingDidKey:keys.messagingDidKey,serviceBase:sourceBase,
       evidence:{document:{},data:{did,rotationKeys:[owner.did(),keys.rotationDidKey],verificationMethods:{

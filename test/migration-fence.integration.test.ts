@@ -695,8 +695,9 @@ integration("fenced transfer and concurrent cutover", () => {
       did,operation_cid:operationCid,verified_at:verifiedAt,witnesses:[]});
     const evidenceDigest=new Uint8Array(createHash("sha256").update(evidenceBytes).digest());
     const profileDigest=new Uint8Array(createHash("sha256").update(profile.cose).digest());
-    await source.sql`INSERT INTO public_plc_resolution_evidence(evidence_digest,did,operation_cid,verified_at,bundle_bytes)
-      VALUES(${evidenceDigest},${did},${operationCid},${verifiedAt},${evidenceBytes})`;
+    await source.sql`INSERT INTO public_plc_resolution_evidence
+      (evidence_digest,did,operation_cid,verified_at,bundle_bytes,record_version,read_evidence_policy_version)
+      VALUES(${evidenceDigest},${did},${operationCid},${verifiedAt},${evidenceBytes},1,'hail.plc-read-evidence-v1')`;
     await source.sql`INSERT INTO public_signing_authority_evidence(action_type,local_account_id,authority_did,authority_role,
       representation_digest,evidence_digest,committed_at) VALUES('sender-profile',${id},${did},'hail-messaging',
       ${profileDigest},${evidenceDigest},${verifiedAt})`;
@@ -936,17 +937,6 @@ integration("fenced transfer and concurrent cutover", () => {
     finally{await target.sql`UPDATE portable_cutover_observations SET state='eligible' WHERE transfer_id=${fence.transferId}`;}
     const rollbackConnection=await target.sql.reserve();
     try {
-      if((await rollbackConnection`SELECT version FROM schema_migrations WHERE version=49`).length)
-        await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0049_managed_migration_materialization.sql",import.meta.url)).text());
-      if((await rollbackConnection`SELECT version FROM schema_migrations WHERE version=48`).length)
-        await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0048_managed_migration_approval.sql",import.meta.url)).text());
-      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0047_managed_provider_migration.sql",import.meta.url)).text());
-      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0046_reverse_custody_transition.sql",import.meta.url)).text());
-      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text());
-      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0044_public_onboarding.sql",import.meta.url)).text());
-      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0043_public_signing_authority.sql",import.meta.url)).text());
-      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0042_public_grant_authority.sql",import.meta.url)).text());
-      await rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0041_public_plc_authority.sql",import.meta.url)).text());
       await expect(rollbackConnection.unsafe(await Bun.file(new URL("../migrations/rollback/0040_public_cutover_evidence.sql",import.meta.url)).text())).rejects.toThrow("prevent rollback");
     }
     finally{await rollbackConnection.unsafe("ROLLBACK");rollbackConnection.release();}

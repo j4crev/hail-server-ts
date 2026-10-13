@@ -104,13 +104,15 @@ export class AccountApiRepository {
       SELECT role, public_key FROM account_keys WHERE account_id = ${session.account_id} ORDER BY role`;
     const identity = keys.find(key => key.role === "hail-identity");
     const rotation = keys.find(key => key.role === "plc-rotation");
-    const managed = await this.sql<{owner_recovery_public_key:string;verification_mode:string}[]>`
-      SELECT owner_recovery_public_key,verification_mode FROM managed_custody_evidence WHERE account_id=${session.account_id}`;
+    const managed = await this.sql<{owner_recovery_public_key:string;verification_mode:string;managed_profile_version:string}[]>`
+      SELECT owner_recovery_public_key,verification_mode,managed_profile_version
+      FROM managed_custody_evidence WHERE account_id=${session.account_id}`;
     const profile = managed[0] && identity ? "managed" : custody[0] && !identity ? "owner-controlled" : !custody[0] && identity && rotation ?
       "custodial-poc" : "unknown";
     return { type: "hailp.account", version: 1, provider, accountId: session.account_id,
       did: session.did, address: session.canonical_address, migrationState: session.migration_state,
       custodyProfile: profile, monitorVerificationMode: managed[0]?.verification_mode ?? custody[0]?.monitor_verification_mode ?? null,
+      managedProfileVersion: managed[0]?.managed_profile_version ?? null,
       identityPublicKey: custody[0]?.user_identity_public_key ?? identity?.public_key ?? null,
       ownerRecoveryPublicKey: managed[0]?.owner_recovery_public_key ?? custody[0]?.user_recovery_public_key ?? null, scopes: session.scopes,
       credential: { credentialId: session.credential_id, expiresAt: session.credential_expires_at.toISOString() } };

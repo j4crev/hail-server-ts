@@ -11,6 +11,7 @@ import { canonicalizeHailAddress } from "../identity/address.js";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import type { KeyEncryptor } from "../identity/key-encryption.js";
 import { generateAccountKeys, importEd25519PrivateKey } from "../identity/keys.js";
+import { MANAGED_CUSTODY_PROFILE_VERSION } from "../identity/managed-profile.js";
 import type { PlcDirectoryClient } from "../plc/client.js";
 import { isPlcNotFound } from "../plc/client.js";
 import { verifyRegisteredGenesis } from "../plc/verify.js";
@@ -23,6 +24,7 @@ export interface PrivatePocPreparation {
   providerRotationKey: string; providerMessagingKey: string;
   sourceServiceBase: string;
   custodyProfile: "owner-controlled" | "managed";
+  managedProfileVersion: typeof MANAGED_CUSTODY_PROFILE_VERSION | null;
 }
 
 interface PreparationRow {
@@ -30,6 +32,7 @@ interface PreparationRow {
   provider_rotation_public_key: string; provider_messaging_public_key: string;
   monitor_public_key: string;
   custody_profile: "owner-controlled" | "managed";
+  managed_profile_version: typeof MANAGED_CUSTODY_PROFILE_VERSION | null;
   signup_token_hash: Uint8Array | null;
 }
 
@@ -54,7 +57,7 @@ export class PrivatePocOnboarding {
     }
     const prior = await this.sql<(PreparationRow & { canonical_address: string;
       onboarding_state: string })[]>`
-      SELECT p.account_id, p.user_recovery_public_key, p.user_identity_public_key,p.custody_profile,p.signup_token_hash,
+      SELECT p.account_id, p.user_recovery_public_key, p.user_identity_public_key,p.custody_profile,p.managed_profile_version,p.signup_token_hash,
         p.provider_rotation_public_key, p.provider_messaging_public_key, p.monitor_public_key,
         account.canonical_address, account.onboarding_state
       FROM provider_accounts account JOIN private_poc_onboarding_preparations p
@@ -69,6 +72,7 @@ export class PrivatePocOnboarding {
       }
       return { accountId: prior[0].account_id, address,
         userRecoveryKey: recovery, userIdentityKey: prior[0].user_identity_public_key, custodyProfile: profile,
+        managedProfileVersion: prior[0].managed_profile_version,
         providerRotationKey: prior[0].provider_rotation_public_key,
         providerMessagingKey: prior[0].provider_messaging_public_key, sourceServiceBase: this.serviceBase };
     }
@@ -98,11 +102,13 @@ export class PrivatePocOnboarding {
       await tx`INSERT INTO private_poc_onboarding_preparations
         (account_id, user_recovery_public_key, user_identity_public_key,
          provider_rotation_public_key, provider_messaging_public_key,
-          monitor_public_key, backup_checked_at,custody_profile,signup_token_hash)
+           monitor_public_key, backup_checked_at,custody_profile,managed_profile_version,signup_token_hash)
         VALUES (${accountId}, ${recovery}, ${identity}, ${generated.rotationDidKey},
-          ${generated.messagingDidKey}, ${monitorPublicKey}, clock_timestamp(),${profile},${signupHash ?? null})`;
+          ${generated.messagingDidKey}, ${monitorPublicKey}, clock_timestamp(),${profile},
+          ${profile === "managed" ? MANAGED_CUSTODY_PROFILE_VERSION : null},${signupHash ?? null})`;
     });
     return { accountId, address, userRecoveryKey: recovery, userIdentityKey: identity, custodyProfile: profile,
+      managedProfileVersion: profile === "managed" ? MANAGED_CUSTODY_PROFILE_VERSION : null,
       providerRotationKey: generated.rotationDidKey,
       providerMessagingKey: generated.messagingDidKey, sourceServiceBase: this.serviceBase };
   }
@@ -190,8 +196,10 @@ export class PrivatePocOnboarding {
             ${JSON.stringify(operation)}::jsonb, ${operationBytes}, ${dagCborBytes},
             ${JSON.stringify(state)}::jsonb, 'prepared')`;
         if (prepared.custody_profile === "managed") {
-          await tx`INSERT INTO managed_custody_evidence (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode)
-            VALUES (${accountId},${prepared.user_recovery_public_key},${prepared.user_identity_public_key},'poc-local')`;
+          await tx`INSERT INTO managed_custody_evidence
+            (account_id,owner_recovery_public_key,provider_identity_public_key,verification_mode,managed_profile_version)
+            VALUES (${accountId},${prepared.user_recovery_public_key},${prepared.user_identity_public_key},'poc-local',
+              ${MANAGED_CUSTODY_PROFILE_VERSION})`;
         } else await tx`INSERT INTO portable_custody_evidence
           (account_id, user_recovery_public_key, user_identity_public_key,
            monitor_origin, monitor_public_key, monitor_confirmed_at,

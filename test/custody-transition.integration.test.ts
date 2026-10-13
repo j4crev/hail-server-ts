@@ -133,7 +133,8 @@ integration("same-provider custody changes are owner-approved, retryable and ato
     expect(current.current_revision).toBe(2);expect(await db.sql`SELECT grant_id FROM grant_revisions WHERE grant_id=${grantId}`).toHaveLength(2);
     expect(Buffer.from((await db.sql<{cose:Uint8Array}[]>`SELECT cose FROM grant_revisions WHERE grant_id=${grantId} AND revision=1`)[0]!.cose)).toEqual(Buffer.from(grantCose));
     expect((await db.sql<{current_revision:number}[]>`SELECT current_revision FROM grant_lineages WHERE grant_id=${terminalId}`)[0]!.current_revision).toBe(1);
-    expect(await db.sql`SELECT transition_id FROM custody_transition_preparations WHERE transition_id=${transition.transitionId} AND state='complete' AND retired_custody_evidence IS NOT NULL`).toHaveLength(1);
+    expect(await db.sql`SELECT transition_id FROM custody_transition_preparations WHERE transition_id=${transition.transitionId}
+      AND state='complete' AND retired_custody_evidence IS NOT NULL AND managed_profile_version='hail-managed-custody-v1'`).toHaveLength(1);
     expect(await db.sql`SELECT id FROM address_bindings WHERE account_id=${prepared.accountId}`).toHaveLength(2);
     const connection=await db.sql.reserve();try{await expect(connection.unsafe(await Bun.file(new URL("../migrations/rollback/0045_same_provider_custody_transition.sql",import.meta.url)).text())).rejects.toThrow("rollback refused");}
     finally{await connection.unsafe("ROLLBACK");connection.release();}
