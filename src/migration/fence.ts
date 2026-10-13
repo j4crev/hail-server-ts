@@ -288,6 +288,8 @@ export class MigrationFenceService {
         throw new Error("Destination activation receipt does not match the fenced snapshot");
       }
       const bytes = encodeDeterministic({ payload: signed.payloadBytes, signature: signed.signature });
+      await tx`UPDATE account_api_credentials SET revoked_at=COALESCE(revoked_at,clock_timestamp())
+        WHERE account_id=${fence.account_id}`;
       if (fence.state === "retired") {
         const saved = await tx<{ retirement_receipt_bytes: Uint8Array }[]>`
           SELECT retirement_receipt_bytes FROM provider_migration_fences

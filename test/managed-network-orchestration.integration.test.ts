@@ -412,6 +412,8 @@ integration("materializes an exact managed A to B to A round trip across fixed H
     expect((await retire()).status).toBe(204);
     expect((await source.sql<{state:string}[]>`SELECT state FROM provider_migration_fences WHERE transfer_id=${offer.transfer_id}`)[0]?.state).toBe("retired");
     expect(await source.sql`SELECT 1 FROM provider_retired_transfer_history WHERE transfer_id=${offer.transfer_id}`).toHaveLength(1);
+    expect((await source.sql<{revoked_at:Date|null}[]>`SELECT revoked_at FROM account_api_credentials WHERE account_id=${accountId}`)
+      .every(row=>row.revoked_at instanceof Date)).toBe(true);
     const changedReceipt={...receipt,signature:Uint8Array.from(receipt.signature)};
     changedReceipt.signature[0]=(changedReceipt.signature[0]??0)^1;
     const changedRetirement=await withFreshServingGenerations(source.sql,()=>sourceApp.request(
