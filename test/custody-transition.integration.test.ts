@@ -41,7 +41,8 @@ integration("same-provider custody changes are owner-approved, retryable and ato
     async getAuditableLog(did){return Promise.all((await this.getOperationLog(did)).map(async(operation,index)=>({did,operation,
       cid:(await cidForCbor(operation)).toString(),nullified:false,createdAt:new Date(auditBase+index*1000).toISOString()})));}};
   const reader=(name:string)=>({origin:`https://reader-${name}.example.com`,operator:`reader-${name}`,
-    resolver:new PlcHailDidResolver(plc),audit:(did:string)=>plc.getAuditableLog(did)});
+    resolver:new PlcHailDidResolver(plc),audit:(did:string)=>plc.getAuditableLog(did),
+    health:async()=>({lastCommittedOpTime:new Date().toISOString()})});
   const resolver=new VerifiedPublicPlcResolver(db.sql,[reader("one"),reader("two")],["provider"],["https://local.example.com"]);
   const repository=new OnboardingRepository(db.sql),serviceBase="https://local.example.com/hail";
   const verifier={async verify(address:string){const account=await repository.getAccountByAddress(address),binding=await repository.getBindingForAccount(account.id);

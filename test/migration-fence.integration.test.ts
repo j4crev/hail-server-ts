@@ -874,6 +874,7 @@ integration("fenced transfer and concurrent cutover", () => {
       evidence: { document: {}, data: nextState!, log: [genesisOperation, updated] } };
     const observer = (origin: string): IndependentPlcObserver => ({
       origin, operator: new URL(origin).hostname,
+      async health() { return { lastCommittedOpTime: new Date(cutoverClock).toISOString() }; },
       resolver: { async resolve() { return observed; } },
       async audit() { return [
         { did, operation: genesisOperation, cid: (await cidForCbor(genesisOperation)).toString(),

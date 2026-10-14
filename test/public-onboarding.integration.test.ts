@@ -34,7 +34,8 @@ it.skipIf(!process.env.DATABASE_URL)("public owner/managed onboarding seals owne
     }))); },
   };
   const reader = (name: string) => ({ origin: `https://reader-${name}.example.com`, operator: `reader-${name}`,
-    resolver: new PlcHailDidResolver(plc), audit: (did: string) => plc.getAuditableLog(did) });
+    resolver: new PlcHailDidResolver(plc), audit: (did: string) => plc.getAuditableLog(did),
+    health: async () => ({ lastCommittedOpTime: new Date().toISOString() }) });
   const resolver = new VerifiedPublicPlcResolver(db.sql, [reader("one"), reader("two")], ["provider"], ["https://local.example.com"]);
   const repository = new OnboardingRepository(db.sql), base = "https://local.example.com/hail";
   const verifier = { async verify(address: string) {

@@ -40,13 +40,22 @@ describe("validated PLC rotation and service migration fixture", () => {
     expect(second?.verificationMethods["hail-messaging"]).toBe(newKey.didKey);
     let current: DocumentData = first;
     const plc: PlcDirectoryClient = {
-      getDocument: async () => formatDidDoc(current),
+      getDocument: async () => {
+        const { "@context": _context, ...document } = formatDidDoc(current);
+        return { ...document,
+          verificationMethod: document.verificationMethod.map(entry => ({ ...entry,
+            id: entry.id.startsWith("#") ? `${current.did}${entry.id}` : entry.id })),
+          service: document.service.map(entry => ({ ...entry,
+            id: entry.id.startsWith("#") ? `${current.did}${entry.id}` : entry.id })) };
+      },
       getDocumentData: async () => current,
       getOperationLog: async () => current === first ? [genesis.operation] : [genesis.operation, successor],
       health: async () => ({}), getAuditableLog: async () => [], sendOperation: async () => {},
     };
     const validated = new PlcHailDidResolver(plc);
-    expect((await validated.resolve(genesis.did)).serviceBase).toBe(oldBase);
+    const replicaResolved = await validated.resolve(genesis.did);
+    expect(replicaResolved.serviceBase).toBe(oldBase);
+    expect(replicaResolved.evidence.document).not.toHaveProperty("@context");
 
     const bob = `did:plc:${"b".repeat(24)}`;
     const resolver: HailDidResolver = { resolve: (did) => did === genesis.did

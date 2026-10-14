@@ -6,7 +6,7 @@ import type { AppConfig } from "../config.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { ed25519PublicKeyFromDidKey } from "../identity/did-key.js";
 import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js";
-import { assertPublicPlcReaders, createIndependentPlcObserver, type IndependentPlcObserver, type PublicPlcAuthorityConfig } from "./observers.js";
+import { assertFreshPlcReaderHealth, assertPublicPlcReaders, createIndependentPlcObserver, type IndependentPlcObserver, type PublicPlcAuthorityConfig } from "./observers.js";
 import { canonicalizeHailServiceBase, PlcHailDidResolver, type HailDidResolver, type ResolvedHailDid } from "./resolver.js";
 import { createPlcDirectoryClient, withAbort } from "./client.js";
 import { encodePublicEvidence, evidenceHash, validatePlcReadEvidence } from "./read-evidence.js";
@@ -40,7 +40,9 @@ export class VerifiedPublicPlcResolver implements HailDidResolver {
     if (!/^did:plc:[a-z2-7]{24}$/.test(did)) throw new Error("DID is not canonical did:plc");
     const signal=AbortSignal.timeout(this.timeoutMs),started=this.now();
     const observations=await withAbort(Promise.all(this.readers.map(async reader=>{
-      const [resolved,audit]=await Promise.all([reader.resolver.resolve(did),reader.audit(did)]);
+      if (!reader.health) throw new Error("Public PLC reader does not expose replica health");
+      const [resolved,audit,health]=await Promise.all([reader.resolver.resolve(did),reader.audit(did),reader.health()]);
+      assertFreshPlcReaderHealth(health,started);
       const checked=await validatePlcReadEvidence(did,resolved.evidence,audit);
       if(resolved.did!==did || resolved.identityDidKey!==checked.state.verificationMethods["hail-identity"] ||
         resolved.messagingDidKey!==checked.state.verificationMethods["hail-messaging"] || resolved.identityDidKey===resolved.messagingDidKey ||

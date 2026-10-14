@@ -8,6 +8,7 @@ export interface IndependentPlcObserver {
   operator?: string;
   resolver: HailDidResolver;
   audit(did: string): Promise<readonly ExportedOp[]>;
+  health?(): Promise<unknown>;
 }
 
 export interface PublicPlcAuthorityConfig {
@@ -39,5 +40,16 @@ export function canonicalPlcReadOrigin(input: string): boolean {
 export function createIndependentPlcObserver(origin: string, operator: string): IndependentPlcObserver {
   if (!canonicalPlcReadOrigin(origin) || !/^[A-Za-z0-9._-]{1,128}$/.test(operator)) throw new Error("Invalid configured PLC reader origin/operator");
   const client = createPlcDirectoryClient(origin);
-  return { origin, operator, resolver: new PlcHailDidResolver(client), audit: did => client.getAuditableLog(did) };
+  return { origin, operator, resolver: new PlcHailDidResolver(client), audit: did => client.getAuditableLog(did),
+    health: () => client.health() };
+}
+
+export function assertFreshPlcReaderHealth(value: unknown, now: Date, maxAgeMs = 300_000): void {
+  const timestamp = value && typeof value === "object" && !Array.isArray(value) &&
+    "lastCommittedOpTime" in value ? value.lastCommittedOpTime : undefined;
+  const committed = typeof timestamp === "string" ? new Date(timestamp) : new Date(NaN);
+  if (!Number.isFinite(now.getTime()) || !Number.isFinite(committed.getTime()) || committed.toISOString() !== timestamp ||
+    now.getTime() - committed.getTime() > maxAgeMs || committed.getTime() - now.getTime() > maxAgeMs) {
+    throw new Error("PLC reader health is missing, stale or has an invalid clock");
+  }
 }

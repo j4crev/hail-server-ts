@@ -138,6 +138,7 @@ integration.each(["poc-local","strict-public-v1"] as const)("materializes an exa
     let readerDisagreement=false;
     const auditCreatedAt=new Date(Date.now()-60_000).toISOString();
     const readers=["one","two"].map(name=>({origin:`https://reader-${name}.example.com`,operator:`reader-${name}`,
+      async health(){return {lastCommittedOpTime:new Date().toISOString()};},
       resolver:{async resolve(value:string){if(readerFailure&&name==="two")throw new Error("reader outage");const result=await rawResolver.resolve(value);
         return readerDisagreement&&name==="two"?{...result,serviceBase:sourceBase}:result;}},
       async audit(){return Promise.all(plcLog.map(async operation=>({did,cid:(await cidForCbor(operation)).toString(),operation,

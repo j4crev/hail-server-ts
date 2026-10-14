@@ -2,7 +2,6 @@ import {
   Client,
   PlcClientError,
   type CompatibleOpOrTombstone,
-  type DidDocument,
   type DocumentData,
   type ExportedOp,
   type Operation,
@@ -29,7 +28,7 @@ export function withAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> 
 
 export interface PlcDirectoryClient {
   health(): Promise<unknown>;
-  getDocument(did: string): Promise<DidDocument>;
+  getDocument(did: string): Promise<object>;
   getDocumentData(did: string): Promise<DocumentData>;
   getOperationLog(did: string): Promise<CompatibleOpOrTombstone[]>;
   getAuditableLog(did: string): Promise<ExportedOp[]>;
@@ -54,7 +53,7 @@ export class BoundedPlcDirectoryClient implements PlcDirectoryClient {
   }
 
   health(): Promise<unknown> { return this.read("/_health"); }
-  async getDocument(did: string): Promise<DidDocument> { return this.read(this.didPath(did)); }
+  async getDocument(did: string): Promise<object> { return this.read(this.didPath(did)); }
   async getDocumentData(did: string): Promise<DocumentData> { return this.read(`${this.didPath(did)}/data`); }
   async getOperationLog(did: string): Promise<CompatibleOpOrTombstone[]> { return this.read(`${this.didPath(did)}/log`); }
   async getAuditableLog(did: string): Promise<ExportedOp[]> { return this.read(`${this.didPath(did)}/log/audit`); }

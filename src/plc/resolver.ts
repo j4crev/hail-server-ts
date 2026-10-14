@@ -69,10 +69,13 @@ export class PlcHailDidResolver implements HailDidResolver {
       this.plc.getDocumentData(did),
       this.plc.getOperationLog(did),
     ]);
-    const document = def.didDocument.parse(rawDocument);
     const data = def.documentData.parse(rawData);
     const log = rawLog.map((operation) => def.compatibleOpOrTombstone.parse(operation));
     const validated = await validateOperationLog(did, log);
+    const expectedDocument = formatDidDoc(data);
+    const replicaDocument = rawDocument && typeof rawDocument === "object" && !Array.isArray(rawDocument) &&
+      !("@context" in rawDocument) ? { ...rawDocument, "@context": expectedDocument["@context"] } : rawDocument;
+    const document = def.didDocument.parse(replicaDocument);
     if (validated === null || !isDeepStrictEqual(validated, data) || document.id !== did) {
       throw new Error("PLC state failed validation");
     }
@@ -87,7 +90,7 @@ export class PlcHailDidResolver implements HailDidResolver {
         id: entry.id.startsWith("#") ? `${did}${entry.id}` : entry.id,
       })),
     });
-    if (!isDeepStrictEqual(normalizeDocumentIds(document), normalizeDocumentIds(formatDidDoc(data)))) {
+    if (!isDeepStrictEqual(normalizeDocumentIds(document), normalizeDocumentIds(expectedDocument))) {
       throw new Error("PLC rendered document does not match current validated state");
     }
 
@@ -143,7 +146,7 @@ export class PlcHailDidResolver implements HailDidResolver {
       identityDidKey,
       messagingDidKey,
       serviceBase: canonicalizeHailServiceBase(service.endpoint),
-      evidence: { document, data, log },
+      evidence: { document: rawDocument as object, data, log },
     };
   }
 }

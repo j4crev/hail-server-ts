@@ -95,6 +95,15 @@ PLC_PROVIDER_OPERATORS=["provider-operator"]
 ```
 
 These are configuration examples, not independently verified operators/hosts.
+The supported read-replica API may return either `application/did+json` or
+`application/did+ld+json`. Strict public reads also require each replica's
+`/_health` `lastCommittedOpTime` to be within five minutes. To exercise both
+currently known public replica implementations with a public Hail-profile DID:
+
+```bash
+PUBLIC_PLC_SMOKE_DID=did:plc:... bun run test:plc-live
+```
+
 Reader/operator declarations must be distinct and outside the provider. Absence
 of the authority profile preserves the POC baseline; orphaned/invalid public
 declarations are refused. Use one consistent runtime for all serving/worker/tools

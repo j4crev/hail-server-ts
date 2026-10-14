@@ -3,7 +3,7 @@ import { cidForCbor } from "@atproto/common";
 import { def, validateOperationLog } from "@did-plc/lib";
 import { plcStateDigest, validatePlcReadEvidence } from "../plc/read-evidence.js";
 import type { SQL } from "bun";
-import { canonicalPlcReadOrigin, type IndependentPlcObserver } from "../plc/observers.js";
+import { assertFreshPlcReaderHealth, canonicalPlcReadOrigin, type IndependentPlcObserver } from "../plc/observers.js";
 export { createIndependentPlcObserver, type IndependentPlcObserver } from "../plc/observers.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { validateTransferManifest } from "./transfer.js";
@@ -77,9 +77,11 @@ export class PortableCutoverGate {
       throw new Error("Cutover requires two independently configured HTTPS PLC readers and provider operator declarations");
     }
     const observations = await withAbort(Promise.all(this.observers.map(async (observer) => {
-      const [resolved, audit] = await Promise.all([
-        observer.resolver.resolve(manifest.did), observer.audit(manifest.did),
+      if (!observer.health) throw new Error("Public PLC reader does not expose replica health");
+      const [resolved, audit, health] = await Promise.all([
+        observer.resolver.resolve(manifest.did), observer.audit(manifest.did), observer.health(),
       ]);
+      assertFreshPlcReaderHealth(health, now);
       const checked = await validatePlcReadEvidence(manifest.did, resolved.evidence, audit);
       const cids = await Promise.all(checked.log.map(async operation => (await cidForCbor(operation)).toString()));
       const checkpoint = cids.indexOf(report.bootstrap_cid!);

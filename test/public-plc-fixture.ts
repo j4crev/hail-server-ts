@@ -30,6 +30,7 @@ export function publicPlcReaders(fixtures: Awaited<ReturnType<typeof publicPlcFi
       cid:(await cidForCbor(operation)).toString(),nullified:false,createdAt:new Date(1_800_000_000_000+index*1000).toISOString()})));},
   };
   const reader=(name:string)=>({origin:`https://reader-${name}.example.com`,operator:`reader-${name}`,
-    resolver:new PlcHailDidResolver(plc),audit:(did:string)=>plc.getAuditableLog(did)});
+    resolver:new PlcHailDidResolver(plc),audit:(did:string)=>plc.getAuditableLog(did),
+    health:async()=>({lastCommittedOpTime:new Date().toISOString()})});
   return [reader("one"),reader("two")];
 }

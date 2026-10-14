@@ -8,6 +8,8 @@ it("refuses reader outage, contradictory state/audit and hung reads before persi
   const sql={begin} as unknown as SQL;
   for(const bad of [
     {...readers[1],async audit(){throw new Error("Reader outage");}},
+    {...readers[1],async health(){return {lastCommittedOpTime:"2000-01-01T00:00:00.000Z"};}},
+    {...readers[1],async health(){return {}; }},
     {...readers[1],async audit(did:string){return (await readers[1].audit(did)).map(entry=>({...entry,createdAt:"2000-01-01T00:00:00.000Z"}));}},
     {...readers[1],resolver:{async resolve(did:string){const resolved=await readers[1].resolver.resolve(did);return {...resolved,messagingDidKey:resolved.identityDidKey};}}},
   ])await expect(new VerifiedPublicPlcResolver(sql,[readers[0],bad],["provider"],["https://local.example.com"])
@@ -19,7 +21,9 @@ it("refuses reader outage, contradictory state/audit and hung reads before persi
 });
 
 it("rejects backward/expired local verification clocks and malformed subjects",async()=>{
-  const fixture=await publicPlcFixture(),readers=publicPlcReaders([fixture]),begin=vi.fn(),sql={begin} as unknown as SQL;
+  const fixture=await publicPlcFixture(),baseReaders=publicPlcReaders([fixture]),
+    readers=baseReaders.map(reader=>({...reader,async health(){return {lastCommittedOpTime:new Date(1_800_000_000_000).toISOString()};}})) as typeof baseReaders,
+    begin=vi.fn(),sql={begin} as unknown as SQL;
   for(const elapsed of [-1,16_000]){
     let calls=0;const clock=()=>new Date(1_800_000_000_000+(calls++?elapsed:0));
     await expect(new VerifiedPublicPlcResolver(sql,readers,["provider"],["https://local.example.com"],clock).resolve(fixture.did)).rejects.toThrow("clock/deadline");
