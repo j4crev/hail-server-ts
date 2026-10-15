@@ -861,7 +861,7 @@ integration("fenced transfer and concurrent cutover", () => {
     }
   });
 
-  it("requires matching independent PLC witnesses and monitor coverage throughout the recovery window", async () => {
+  it("requires exact validated PLC state and monitor coverage throughout the recovery window", async () => {
     const fence = (await fenceService.get(did))!;
     const updated = signedCutoverOperation;
     const nextState = await validateOperationLog(did, [genesisOperation, updated]);
@@ -885,9 +885,10 @@ integration("fenced transfer and concurrent cutover", () => {
     const witnesses: [IndependentPlcObserver, IndependentPlcObserver] = [
       observer("https://mirror-one.example.com"), observer("https://mirror-two.example.com"),
     ];
+    const canonical={async getOperationLog(){return observed.evidence.log;}};
     cutoverClock = Date.now();
     const providerOperators = ["source-operator", "target-operator"];
-    targetGate = new PortableCutoverGate(target.sql, witnesses, () => new Date(cutoverClock), providerOperators);
+    targetGate = new PortableCutoverGate(target.sql, witnesses, () => new Date(cutoverClock), providerOperators,undefined,canonical);
     const first = Math.floor(cutoverClock / 1000);
     const report = async () => signMonitorAttestation({
       type: "hail.plc-monitor-attestation", version: 2, did,
@@ -914,10 +915,10 @@ integration("fenced transfer and concurrent cutover", () => {
     expect(bundle.monitor.payload).toEqual(exactReport.payloadBytes); expect(bundle.monitor.signature).toEqual(exactReport.signature);
     expect(bundle.monitor.public_key).toBe(monitorPublicKey);
     expect(bundle.bootstrap.state_digest).toBe(plcStateDigest(bundle.bootstrap.state));
-    expect(bundle.witnesses.map((entry: any)=>entry.origin)).toEqual(witnesses.map(entry=>entry.origin));
+    expect(bundle.witnesses.map((entry: any)=>entry.origin)).toEqual([witnesses[0].origin]);
     expect(bundle.witnesses[0].log).toEqual([genesisOperation,updated]);
     expect(bundle.witnesses[0].signed_operations[0].dag_cbor).toEqual(new Uint8Array(dagCbor.encode(genesisOperation)));
-    const restartedGate = new PortableCutoverGate(target.sql,witnesses,()=>new Date(cutoverClock),providerOperators);
+    const restartedGate = new PortableCutoverGate(target.sql,witnesses,()=>new Date(cutoverClock),providerOperators,undefined,canonical);
     const retried = await Promise.all([restartedGate.assess(fence.transferId,exactReport),targetGate.assess(fence.transferId,exactReport)]);
     expect(retried.map(result=>result.evidenceDigest)).toEqual([initial.evidenceDigest,initial.evidenceDigest]);
     expect(await target.sql`SELECT evidence_digest FROM public_cutover_evidence WHERE transfer_id=${fence.transferId}`).toHaveLength(1);
@@ -953,7 +954,7 @@ integration("fenced transfer and concurrent cutover", () => {
       await target.sql`UPDATE pending_migration_imports SET manifest_bytes=${new TextEncoder().encode(JSON.stringify(privateManifest))} WHERE transfer_id=${fence.transferId}`;
       await expect(targetGate.assess(fence.transferId, await report())).rejects.toThrow("public PLC registration evidence");
     } finally { await target.sql`UPDATE pending_migration_imports SET manifest_bytes=${originalManifest} WHERE transfer_id=${fence.transferId}`; }
-    // Independent observations permit immediate activation. A delayed operator
+    // Validated exact-state observations permit immediate activation. A delayed operator
     // still has to fail previously accepted work whose original deadline expired.
     cutoverClock += 2 * 3600 * 1000;
     expect((await targetGate.assess(fence.transferId, await report())).eligible).toBe(true);
@@ -962,16 +963,14 @@ integration("fenced transfer and concurrent cutover", () => {
       WHERE transfer_id=${fence.transferId} AND evidence_digest=${initial.evidenceDigest!}`)[0]!.bundle_bytes).toEqual(bytes);
     const targetAccount = await target.sql`SELECT id FROM provider_accounts WHERE did = ${did}`;
     expect(targetAccount).toHaveLength(0); // Assessment never activates an import.
-    const disagreement = new PortableCutoverGate(target.sql, [witnesses[0], {
-      ...witnesses[1], async audit() { return [{ did, operation: updated, cid: "bafyunexpected",
+    const fallback = new PortableCutoverGate(target.sql, [{
+      ...witnesses[0], async audit() { return [{ did, operation: updated, cid: "bafyunexpected",
         nullified: false, createdAt: new Date().toISOString() }]; },
-    }], () => new Date(cutoverClock), providerOperators);
-    await expect(disagreement.assess(fence.transferId, await report())).rejects.toThrow("Mirror audit");
-    const differingAudit = new PortableCutoverGate(target.sql, [witnesses[0], { ...witnesses[1], async audit(value) {
-      const entries = await witnesses[1].audit(value);
-      return entries.map(entry => ({ ...entry, createdAt: new Date(Date.parse(entry.createdAt) + 1).toISOString() }));
-    } }], () => new Date(cutoverClock), providerOperators);
-    await expect(differingAudit.assess(fence.transferId, await report())).rejects.toThrow("witnesses disagree");
+    },witnesses[1]], () => new Date(cutoverClock), providerOperators,undefined,canonical);
+    await expect(fallback.assess(fence.transferId, await report())).resolves.toMatchObject({eligible:true});
+    const staleCanonical=new PortableCutoverGate(target.sql,witnesses,()=>new Date(cutoverClock),providerOperators,undefined,
+      {async getOperationLog(){return [genesisOperation];}});
+    await expect(staleCanonical.assess(fence.transferId,await report())).rejects.toThrow("Canonical PLC");
     for (const unsafe of [
       { ...witnesses[1], operator: witnesses[0].operator! },
       { ...witnesses[1], operator: "source-operator" },
@@ -981,15 +980,18 @@ integration("fenced transfer and concurrent cutover", () => {
       { ...witnesses[1], origin: "https://mirror..example.com" },
     ]) {
       await expect(new PortableCutoverGate(target.sql, [witnesses[0], unsafe], () => new Date(cutoverClock), providerOperators)
-        .assess(fence.transferId, await report())).rejects.toThrow("independently configured");
+        .assess(fence.transferId, await report())).rejects.toThrow("distinct HTTPS reader");
     }
     const unavailable = new PortableCutoverGate(target.sql, [witnesses[0], { ...witnesses[1], async audit() { throw new Error("Reader unavailable"); } }],
-      () => new Date(cutoverClock), providerOperators);
-    await expect(unavailable.assess(fence.transferId, await report())).rejects.toThrow("Reader unavailable");
-    const pausedImport = new PortableCutoverGate(target.sql,[witnesses[0],{...witnesses[1],async audit(value){
+      () => new Date(cutoverClock), providerOperators,undefined,canonical);
+    await expect(unavailable.assess(fence.transferId, await report())).resolves.toMatchObject({eligible:true});
+    const allUnavailable = new PortableCutoverGate(target.sql,witnesses.map(reader=>({...reader,async audit(){throw new Error("Reader unavailable");}})),
+      () => new Date(cutoverClock), providerOperators,undefined,canonical);
+    await expect(allUnavailable.assess(fence.transferId, await report())).rejects.toThrow("No configured PLC reader");
+    const pausedImport = new PortableCutoverGate(target.sql,[{...witnesses[0],async audit(value){
       await target.sql`UPDATE pending_migration_imports SET manifest_bytes=${new Uint8Array([...originalManifest,10])} WHERE transfer_id=${fence.transferId}`;
-      return witnesses[1].audit(value);
-    }}],()=>new Date(cutoverClock),providerOperators);
+      return witnesses[0].audit(value);
+    }}],()=>new Date(cutoverClock),providerOperators,undefined,canonical);
     try {await expect(pausedImport.assess(fence.transferId,await report())).rejects.toThrow("import changed");}
     finally{await target.sql`UPDATE pending_migration_imports SET manifest_bytes=${originalManifest} WHERE transfer_id=${fence.transferId}`;}
     const legacy = await signMonitorAttestation({ type: "hail.plc-monitor-attestation", version: 1, did,

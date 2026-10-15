@@ -21,7 +21,15 @@ describe("loadConfig", () => {
     PLC_PROVIDER_OPERATORS:JSON.stringify(["provider-operator"])};
   it("selects strict public authority explicitly and preserves the default POC configuration",()=>{
     expect(loadConfig(publicEnvironment).publicPlcAuthority).toMatchObject({profile:"strict-public-v1",providerOperators:["provider-operator"]});
+    expect(loadConfig({...publicEnvironment,PLC_PUBLIC_READERS:JSON.stringify([
+      {origin:"https://reader-one.example.com",operator:"reader-one"}])}).publicPlcAuthority?.readers).toHaveLength(1);
     expect(loadConfig(validEnvironment).publicPlcAuthority).toBeUndefined();
+  });
+  it("accepts an optional public diagnostic DID only with strict authority",()=>{
+    const did=`did:plc:${"a".repeat(24)}`;
+    expect(loadConfig({...publicEnvironment,PLC_READER_DIAGNOSTIC_DID:did}).plcReaderDiagnosticDid).toBe(did);
+    expect(()=>loadConfig({...validEnvironment,PLC_READER_DIAGNOSTIC_DID:did})).toThrow("strict public authority");
+    expect(()=>loadConfig({...publicEnvironment,PLC_READER_DIAGNOSTIC_DID:"not-a-did"})).toThrow("canonical did:plc");
   });
   it("refuses private registry, orphaned declarations and non-independent public readers",()=>{
     for(const environment of [
@@ -29,6 +37,7 @@ describe("loadConfig", () => {
       {...publicEnvironment,PLC_AUTHORITY_PROFILE:"unknown"},
       {...publicEnvironment,PLC_AUTHORITY_PROFILE:"poc"},
       {...publicEnvironment,PLC_PROVIDER_OPERATORS:"[]"},
+      {...publicEnvironment,PLC_PUBLIC_READERS:"[]"},
       {...publicEnvironment,PLC_PUBLIC_READERS:JSON.stringify([{origin:"https://reader-one.example.com",operator:"reader-one"},{origin:"https://reader-one.example.com:8443",operator:"reader-two"}])},
       {...publicEnvironment,PLC_PUBLIC_READERS:JSON.stringify([{origin:"https://reader-one.example.com",operator:"reader-one"},{origin:"https://reader-two.example.com",operator:"provider-operator"}])},
       {...publicEnvironment,PLC_PUBLIC_READERS:JSON.stringify([{origin:"https://reader-one.example.com",operator:"reader-one"},{origin:validEnvironment.PUBLIC_ORIGIN,operator:"reader-two"}])},

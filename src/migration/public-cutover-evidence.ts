@@ -1,3 +1,6 @@
+import { isDeepStrictEqual } from "node:util";
+import { cidForCbor } from "@atproto/common";
+import { def,validateOperationLog } from "@did-plc/lib";
 import { decodeDeterministic, type HailValue } from "@hailproto/codec";
 import type { SQL } from "bun";
 import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js";
@@ -30,15 +33,24 @@ export async function requirePublicCutoverEvidence(sql: SQL, expected: {
     throw new Error("Full public cutover evidence is absent, changed or selected for another activation");
   }
   const bundle = decodeDeterministic(row.bundle_bytes, PUBLIC_EVIDENCE_LIMITS) as Record<string, HailValue>;
-  const monitor = bundle.monitor as Record<string, HailValue>;
+  const monitor = bundle.monitor as Record<string, HailValue>,bootstrap=bundle.bootstrap as Record<string,HailValue>,
+    canonical=bundle.canonical_readback as Record<string,HailValue>,
+    witnesses=bundle.witnesses as Record<string,HailValue>[];
   if (bundle.type !== "hail.public-cutover-evidence" || bundle.version !== 1 || bundle.policy !== PLC_READ_EVIDENCE_POLICY_VERSION ||
     bundle.transfer_id !== expected.transferId || bundle.did !== expected.did || bundle.operation_cid !== row.operation_cid ||
     bundle.verified_at !== row.verified_at.toISOString() || !(bundle.manifest_digest instanceof Uint8Array) ||
     !same(bundle.manifest_digest, expected.manifestDigest) || !(bundle.signed_operation_bytes instanceof Uint8Array) ||
     !same(bundle.signed_operation_bytes, expected.operationBytes) || !monitor || typeof monitor.public_key !== "string" ||
     expected.monitorPublicKey !== undefined && monitor.public_key !== expected.monitorPublicKey ||
-    !(monitor.payload instanceof Uint8Array) || !(monitor.signature instanceof Uint8Array) ||
+    !(monitor.payload instanceof Uint8Array) || !(monitor.signature instanceof Uint8Array) ||canonical?.origin!=="https://plc.directory"||
+    !Array.isArray(canonical.log)||!Array.isArray(witnesses)||witnesses.length!==1||
     !same(evidenceHash(monitor.payload), row.monitor_attestation_digest)) throw new Error("Retained public evidence bundle correlation is invalid");
+  const canonicalLog=canonical.log.map(operation=>def.compatibleOpOrTombstone.parse(operation));
+  const canonicalState=def.documentData.parse(canonical.state),replayed=await validateOperationLog(expected.did,canonicalLog),
+    canonicalCids=await Promise.all(canonicalLog.map(operation=>cidForCbor(operation).then(cid=>cid.toString())));
+  if(!replayed||canonicalCids.at(-1)!==row.operation_cid||typeof bootstrap?.operation_cid!=="string"||
+    !canonicalCids.includes(bootstrap.operation_cid)||!isDeepStrictEqual(replayed,canonicalState)||
+    !isDeepStrictEqual(canonicalState,witnesses[0]!.state))throw new Error("Retained canonical PLC readback is invalid");
   const report = await verifyMonitorAttestation({ payloadBytes: monitor.payload, signature: monitor.signature },
     monitor.public_key as string, Math.floor(row.verified_at.getTime() / 1000), 300);
   if (report.version !== 2 || report.did !== expected.did || report.transfer_id !== expected.transferId ||

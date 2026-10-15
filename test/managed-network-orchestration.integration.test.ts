@@ -393,7 +393,7 @@ integration.each(["poc-local","strict-public-v1"] as const)("materializes an exa
     expect(submissions).toBe(1);
     const disagreeing={async resolve(value:string){return {...await resolver.resolve(value),serviceBase:sourceBase};}};
     await expect(new ManagedMigrationPlcSubmission(target.sql,plc,disagreeing,targetBase).submit(offer.transfer_id))
-      .rejects.toThrow(/Independent readers/);
+      .rejects.toThrow(/Validated public reader/);
     const destinationState=(await validateOperationLog(did,plcLog))!,verifiedAt=new Date().toISOString();
     const bundle=encodeDeterministic({type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",did,
       operation_cid:cutoverCid,verified_at:verifiedAt,witnesses:[{state:destinationState},{state:destinationState}]} as unknown as HailValue),

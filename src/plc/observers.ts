@@ -13,18 +13,18 @@ export interface IndependentPlcObserver {
 
 export interface PublicPlcAuthorityConfig {
   profile: "strict-public-v1";
-  readers: readonly [{origin:string;operator:string},{origin:string;operator:string}];
+  readers: readonly [{origin:string;operator:string},...{origin:string;operator:string}[]];
   providerOperators: readonly string[];
 }
 
 export function assertPublicPlcReaders(readers: readonly {origin:string;operator?:string}[], providerOperators: readonly string[], providerOrigins: readonly string[]): void {
   const operator = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value);
   const hosts = providerOrigins.map(origin => new URL(origin).hostname);
-  if (readers.length !== 2 || providerOperators.length < 1 || providerOperators.length > 2 || !providerOperators.every(operator) ||
+  if (readers.length < 1 || readers.length > 3 || providerOperators.length < 1 || providerOperators.length > 2 || !providerOperators.every(operator) ||
     readers.some(reader => !canonicalPlcReadOrigin(reader.origin) || !operator(reader.operator) || providerOperators.includes(reader.operator) ||
-      hosts.includes(new URL(reader.origin).hostname)) || readers[0]!.operator === readers[1]!.operator ||
-    new URL(readers[0]!.origin).hostname === new URL(readers[1]!.origin).hostname) {
-    throw new Error("Strict public authority requires two independent HTTPS reader/operator declarations outside the provider");
+      hosts.includes(new URL(reader.origin).hostname)) || new Set(readers.map(reader=>reader.operator)).size !== readers.length ||
+    new Set(readers.map(reader=>new URL(reader.origin).hostname)).size !== readers.length) {
+    throw new Error("Strict public authority requires one to three distinct HTTPS reader/operator declarations outside the provider");
   }
 }
 

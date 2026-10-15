@@ -302,7 +302,7 @@ export class SameProviderCustodyTransition {
     }
     const observed=await this.resolver.resolve(row.did);
     if(!observed.evidence.verification||observed.evidence.verification.operationCid!==cid||observed.identityDidKey!==row.new_identity_public_key||
-      observed.serviceBase!==this.serviceBase||!isDeepStrictEqual(observed.evidence.data,expected))throw new Error("Independent readers do not confirm the approved custody state");
+      observed.serviceBase!==this.serviceBase||!isDeepStrictEqual(observed.evidence.data,expected))throw new Error("Validated public reader does not confirm the approved custody state");
     await this.materialize(row,operation,operationBytes,dagBytes,cid,observed.evidence);
     row=await this.row(accountId,transitionId);
     const published=await this.verifier.verify((await this.sql<{canonical_address:string}[]>`SELECT canonical_address FROM provider_accounts WHERE id=${row.account_id}`)[0]!.canonical_address);

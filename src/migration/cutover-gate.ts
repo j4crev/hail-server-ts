@@ -3,7 +3,7 @@ import { cidForCbor } from "@atproto/common";
 import { def, validateOperationLog } from "@did-plc/lib";
 import { plcStateDigest, validatePlcReadEvidence } from "../plc/read-evidence.js";
 import type { SQL } from "bun";
-import { assertFreshPlcReaderHealth, canonicalPlcReadOrigin, type IndependentPlcObserver } from "../plc/observers.js";
+import { assertFreshPlcReaderHealth, assertPublicPlcReaders, type IndependentPlcObserver } from "../plc/observers.js";
 export { createIndependentPlcObserver, type IndependentPlcObserver } from "../plc/observers.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
 import { validateTransferManifest } from "./transfer.js";
@@ -14,6 +14,7 @@ import { encode as encodeDagCbor } from "@ipld/dag-cbor";
 import type { HailValue } from "@hailproto/codec";
 import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js";
 import {withAbort} from "../plc/client.js";
+import type {PlcDirectoryClient} from "../plc/client.js";
 
 export interface CutoverAssessment {
   eligible: boolean;
@@ -26,10 +27,11 @@ export interface CutoverAssessment {
 export class PortableCutoverGate {
   constructor(
     private readonly sql: SQL,
-    private readonly observers: readonly [IndependentPlcObserver, IndependentPlcObserver],
+    private readonly observers: readonly IndependentPlcObserver[],
     private readonly now: () => Date = () => new Date(),
     private readonly providerOperators: readonly string[] = [],
     private readonly managedMonitor?: {monitorOrigin:string;monitorPublicKey:string},
+    private readonly canonical?:Pick<PlcDirectoryClient,"getOperationLog">,
   ) {}
 
   async assess(transferId: string, signedMonitor?: SignedMonitorAttestation): Promise<CutoverAssessment> {
@@ -67,51 +69,52 @@ export class PortableCutoverGate {
     if (report.did !== manifest.did || report.transfer_id !== transferId ||
       report.monitor_origin !== custody.monitor_origin) throw new Error("Independent monitor covers another transfer");
     const providerHosts = [manifest.sourceServiceBase, manifest.destinationServiceBase].map(base => new URL(base).hostname);
-    const identifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9._-]{1,128}$/.test(value);
-    if (providerHosts.includes(new URL(report.monitor_origin).hostname) ||
-      this.providerOperators.length < 1 || this.providerOperators.length > 2 || !this.providerOperators.every(identifier) ||
-      this.observers.some(observer => !canonicalPlcReadOrigin(observer.origin) || !identifier(observer.operator) ||
-        this.providerOperators.includes(observer.operator) || providerHosts.includes(new URL(observer.origin).hostname)) ||
-      this.observers[0].operator === this.observers[1].operator ||
-      new URL(this.observers[0].origin).hostname === new URL(this.observers[1].origin).hostname) {
-      throw new Error("Cutover requires two independently configured HTTPS PLC readers and provider operator declarations");
+    if (providerHosts.includes(new URL(report.monitor_origin).hostname)) throw new Error("Public monitor cannot be provider-operated");
+    assertPublicPlcReaders(this.observers,this.providerOperators,[manifest.sourceServiceBase,manifest.destinationServiceBase]);
+    const deadline=Date.now()+15_000,failures:unknown[]=[];
+    let observation:{observer:IndependentPlcObserver;checked:Awaited<ReturnType<typeof validatePlcReadEvidence>>;
+      document:object;bootstrapState:NonNullable<Awaited<ReturnType<typeof validateOperationLog>>>}|undefined;
+    for(const [index,observer] of this.observers.entries()){
+      const remaining=deadline-Date.now();if(remaining<=0)break;
+      try{
+        observation=await withAbort((async()=>{
+          if (!observer.health) throw new Error("Public PLC reader does not expose replica health");
+          const [resolved,audit,health]=await Promise.all([observer.resolver.resolve(manifest.did),observer.audit(manifest.did),observer.health()]);
+          assertFreshPlcReaderHealth(health,now);
+          const checked=await validatePlcReadEvidence(manifest.did,resolved.evidence,audit);
+          const cids=await Promise.all(checked.log.map(async operation=>(await cidForCbor(operation)).toString()));
+          const checkpoint=cids.indexOf(report.bootstrap_cid!);
+          const bootstrapState=checkpoint<0||checkpoint===checked.log.length-1?null:
+            await validateOperationLog(manifest.did,checked.log.slice(0,checkpoint+1));
+          if(!bootstrapState||plcStateDigest(bootstrapState)!==report.bootstrap_state_digest)
+            throw new Error("Reader does not confirm the reviewed monitor bootstrap checkpoint");
+          const data=checked.state as {rotationKeys:string[];alsoKnownAs:string[]};
+          const recorded=manifest.tables.plc_operation_evidence.at(-1)?.expected_state;
+          const before=(typeof recorded==="string"?parseJsonWithoutDuplicateKeys(recorded):recorded) as {alsoKnownAs?:unknown}|undefined;
+          if(resolved.did!==manifest.did||resolved.serviceBase!==manifest.destinationServiceBase||
+            resolved.messagingDidKey!==manifest.destinationMessagingPublicKey||resolved.identityDidKey!==custody.user_identity_public_key||
+            data.rotationKeys[0]!==custody.user_recovery_public_key||!data.rotationKeys.slice(1).includes(manifest.destinationRotationPublicKey)||
+            data.rotationKeys.some(key=>manifest.tables.account_keys.some(entry=>entry.role==="plc-rotation"&&entry.public_key===key))||
+            !before||!isDeepStrictEqual(data.alsoKnownAs,before.alsoKnownAs))
+            throw new Error("Reader does not confirm the exact portable destination state");
+          if(report.operation_cid!==checked.operationCid||checked.operationCid!==expectedCid)
+            throw new Error("Reader does not confirm the exact user-authorized PLC operation");
+          return {observer,checked,document:structuredClone(resolved.evidence.document),bootstrapState};
+        })(),AbortSignal.timeout(Math.min(5_000,Math.max(1,Math.floor(remaining/(this.observers.length-index))))));
+        break;
+      }catch(error){failures.push(error);}
     }
-    const observations = await withAbort(Promise.all(this.observers.map(async (observer) => {
-      if (!observer.health) throw new Error("Public PLC reader does not expose replica health");
-      const [resolved, audit, health] = await Promise.all([
-        observer.resolver.resolve(manifest.did), observer.audit(manifest.did), observer.health(),
-      ]);
-      assertFreshPlcReaderHealth(health, now);
-      const checked = await validatePlcReadEvidence(manifest.did, resolved.evidence, audit);
-      const cids = await Promise.all(checked.log.map(async operation => (await cidForCbor(operation)).toString()));
-      const checkpoint = cids.indexOf(report.bootstrap_cid!);
-      const bootstrapState = checkpoint < 0 || checkpoint === checked.log.length - 1 ? null :
-        await validateOperationLog(manifest.did, checked.log.slice(0, checkpoint + 1));
-      if (!bootstrapState || plcStateDigest(bootstrapState) !== report.bootstrap_state_digest) {
-        throw new Error("Mirror does not confirm the reviewed monitor bootstrap checkpoint");
-      }
-      const { operationCid, state: validated } = checked;
-      const data = validated as { rotationKeys: string[]; alsoKnownAs: string[] };
-      const recorded = manifest.tables.plc_operation_evidence.at(-1)?.expected_state;
-      const before = (typeof recorded === "string" ? parseJsonWithoutDuplicateKeys(recorded) : recorded) as
-        { alsoKnownAs?: unknown } | undefined;
-      if (resolved.did !== manifest.did || resolved.serviceBase !== manifest.destinationServiceBase ||
-        resolved.messagingDidKey !== manifest.destinationMessagingPublicKey ||
-        resolved.identityDidKey !== custody.user_identity_public_key ||
-        data.rotationKeys[0] !== custody.user_recovery_public_key ||
-        !data.rotationKeys.slice(1).includes(manifest.destinationRotationPublicKey) ||
-        data.rotationKeys.some((key) => manifest.tables.account_keys.some((entry) =>
-          entry.role === "plc-rotation" && entry.public_key === key)) ||
-        !before || !isDeepStrictEqual(data.alsoKnownAs, before.alsoKnownAs)) {
-        throw new Error("Mirror does not confirm the exact portable destination state");
-      }
-      return { checked, document: structuredClone(resolved.evidence.document), bootstrapState };
-    })),AbortSignal.timeout(15_000));
-    if (!isDeepStrictEqual(observations[0]!.checked, observations[1]!.checked) || report.operation_cid !== observations[0]!.checked.operationCid ||
-      observations[0]!.checked.operationCid !== expectedCid) {
-      throw new Error("Cutover witnesses disagree on the current PLC operation");
-    }
-    const operationCid = observations[0]!.checked.operationCid;
+    if(!observation){if(failures.length===1)throw failures[0];throw new AggregateError(failures,"No configured PLC reader confirmed the public cutover");}
+    const operationCid=observation.checked.operationCid;
+    if(!this.canonical)throw new Error("Public cutover requires direct canonical PLC readback");
+    const remaining=deadline-Date.now();
+    if(remaining<=0)throw new DOMException("Public cutover deadline exceeded","TimeoutError");
+    const canonicalLog=await withAbort(this.canonical.getOperationLog(manifest.did),AbortSignal.timeout(remaining));
+    const canonicalState=await validateOperationLog(manifest.did,canonicalLog),
+      canonicalCids=await Promise.all(canonicalLog.map(operation=>cidForCbor(operation).then(cid=>cid.toString())));
+    if(!canonicalState||canonicalCids.at(-1)!==expectedCid||!canonicalCids.includes(report.bootstrap_cid!)||
+      !isDeepStrictEqual(canonicalState,observation.checked.state))
+      throw new Error("Canonical PLC does not confirm the exact public cutover state");
     const attestationDigest = evidenceHash(monitor.payloadBytes), manifestDigest = evidenceHash(pending.manifest_bytes);
     const verifiedAt = this.now();
     if (!Number.isFinite(now.getTime())||verifiedAt.getTime() < now.getTime()||verifiedAt.getTime()-now.getTime()>15_000) throw new Error("PLC verification clock/deadline is invalid");
@@ -151,12 +154,12 @@ export class PortableCutoverGate {
         operation_cid: operationCid, signed_operation_bytes: pending.signed_plc_operation_bytes!,
         first_seen_at: firstSeen.toISOString(), read_started_at: now.toISOString(), verified_at: verifiedAt.toISOString(),
         provider_operators: [...this.providerOperators],
+        canonical_readback: { origin:"https://plc.directory",state:canonicalState,log:canonicalLog },
         monitor: { public_key: custody.monitor_public_key as string, payload: monitor.payloadBytes, signature: monitor.signature },
-        bootstrap: { operation_cid: report.bootstrap_cid!, state_digest: report.bootstrap_state_digest!, state: observations[0]!.bootstrapState },
-        witnesses: observations.map((observation, index) => ({ origin: this.observers[index]!.origin,
-          operator: this.observers[index]!.operator!, document: observation.document,
+        bootstrap: { operation_cid: report.bootstrap_cid!, state_digest: report.bootstrap_state_digest!, state: observation.bootstrapState },
+        witnesses: [{ origin: observation.observer.origin, operator: observation.observer.operator!, document: observation.document,
           state: observation.checked.state, log: observation.checked.log, audit: observation.checked.audit,
-          signed_operations: observation.checked.audit.map(entry => ({ cid: entry.cid, dag_cbor: new Uint8Array(encodeDagCbor(entry.operation)) })) })),
+          signed_operations: observation.checked.audit.map(entry => ({ cid: entry.cid, dag_cbor: new Uint8Array(encodeDagCbor(entry.operation)) })) }],
       } as unknown as HailValue);
       const evidenceDigest = evidenceHash(bundleBytes);
       await tx`INSERT INTO public_cutover_evidence
@@ -183,7 +186,7 @@ export class PortableCutoverGate {
           (transfer_id, did, operation_cid, first_seen_at, last_seen_at,
             mirror_origins, monitor_attestation_digest, state, assessment_profile)
           VALUES (${transferId}, ${manifest.did}, ${operationCid}, ${firstSeen}, ${verifiedAt},
-           ${JSON.stringify(this.observers.map((observer) => observer.origin))}::jsonb,
+            ${JSON.stringify([observation.observer.origin])}::jsonb,
            ${attestationDigest}, 'eligible', 'public')
          ON CONFLICT (transfer_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at,
            mirror_origins = EXCLUDED.mirror_origins,

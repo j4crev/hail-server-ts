@@ -15,6 +15,7 @@ export interface AppConfig {
   databaseUrl: string;
   keyEncryptionKey: string;
   publicPlcAuthority?: PublicPlcAuthorityConfig;
+  plcReaderDiagnosticDid?: string;
   pocManagedTransfer: boolean;
   publicManagedTransfer?: { monitorOrigin: string; monitorPublicKey: string };
 }
@@ -123,6 +124,10 @@ export function loadConfig(environment: Environment = Bun.env): AppConfig {
   }
 
   const publicPlcAuthority = publicPlcAuthorityConfig(environment, plcDirectoryUrl, publicOrigin);
+  const plcReaderDiagnosticDid=environment.PLC_READER_DIAGNOSTIC_DID?.trim();
+  if(plcReaderDiagnosticDid&&!/^did:plc:[a-z2-7]{24}$/.test(plcReaderDiagnosticDid))
+    throw new Error("PLC_READER_DIAGNOSTIC_DID must be a canonical did:plc");
+  if(plcReaderDiagnosticDid&&!publicPlcAuthority)throw new Error("PLC reader diagnostics require strict public authority");
   const managedGate=environment.POC_MANAGED_TRANSFER?.trim();
   if(managedGate!==undefined&&managedGate!=="true"&&managedGate!=="false")throw new Error("POC_MANAGED_TRANSFER must be true or false");
   const pocManagedTransfer=managedGate==="true";
@@ -160,6 +165,7 @@ export function loadConfig(environment: Environment = Bun.env): AppConfig {
     pocManagedTransfer,
     ...(publicManagedTransfer?{publicManagedTransfer}:{}),
     ...(publicPlcAuthority ? { publicPlcAuthority } : {}),
+    ...(plcReaderDiagnosticDid?{plcReaderDiagnosticDid}:{}),
   };
 }
 import { decodeBase64Url } from "@hailproto/codec";

@@ -233,7 +233,7 @@ export class ManagedMigrationActivation {
     if(resolved.evidence.verification?.profile!==this.verificationMode||resolved.evidence.verification.operationCid!==cid||resolved.did!==manifest.did||
       resolved.serviceBase!==this.serviceBase||resolved.identityDidKey!==manifest.destinationIdentityPublicKey||
       resolved.messagingDidKey!==manifest.destinationMessagingPublicKey)
-      throw new Error("Independent readers do not confirm the materialized managed destination");
+      throw new Error("Validated public reader does not confirm the materialized managed destination");
     return resolved;
   }
 

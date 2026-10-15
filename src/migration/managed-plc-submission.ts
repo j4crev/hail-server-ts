@@ -62,7 +62,7 @@ export class ManagedMigrationPlcSubmission {
       if(!expected||resolved.did!==row.did||resolved.serviceBase!==manifest.destinationServiceBase||
         resolved.identityDidKey!==manifest.destinationIdentityPublicKey||resolved.messagingDidKey!==manifest.destinationMessagingPublicKey||
         resolved.evidence.verification?.operationCid!==expectedCid||!isDeepStrictEqual(resolved.evidence.data,expected))
-        throw new Error("Independent readers do not confirm the exact managed destination state");
+        throw new Error("Validated public reader does not confirm the exact managed destination state");
       return expectedCid;
     });
   }

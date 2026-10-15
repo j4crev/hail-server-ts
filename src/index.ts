@@ -67,6 +67,8 @@ import {ManagedMigrationPlcSubmission} from "./migration/managed-plc-submission.
 import {ManagedMigrationActivation} from "./migration/managed-activation.js";
 import {ManagedMigrationCompletion} from "./migration/managed-completion.js";
 import {createPublicManagedRuntime} from "./migration/public-managed-runtime.js";
+import {createIndependentPlcObserver} from "./plc/observers.js";
+import {inspectPlcReaders} from "./plc/diagnostics.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -134,6 +136,22 @@ const transferWorker = new TransferDeliveryWorker(database.sql, invitationDelive
   managedDelivery,managedFencePublisher);
 
 if (!schemaRehearsal) {
+if(config.publicPlcAuthority){
+  const diagnosticReaders=config.publicPlcAuthority.readers.map(reader=>createIndependentPlcObserver(reader.origin,reader.operator));
+  let diagnosticRunning=false,lastDiagnosticHealthy:boolean|undefined;
+  const diagnose=async()=>{
+    if(diagnosticRunning)return;diagnosticRunning=true;
+    try{
+      const result=await inspectPlcReaders(diagnosticReaders,new Date(),config.plcReaderDiagnosticDid);
+      if(!result.healthy||lastDiagnosticHealthy!==result.healthy)console[result.healthy?"info":"warn"](JSON.stringify({
+        level:result.healthy?"info":"warn",message:`PLC reader diagnostic ${result.healthy?"healthy":"warning"}`,...result}));
+      lastDiagnosticHealthy=result.healthy;
+    }catch(error){console.warn(JSON.stringify({level:"warn",message:"PLC reader diagnostic failed",
+      error:error instanceof Error?error.message:"unknown error"}));lastDiagnosticHealthy=false;}
+    finally{diagnosticRunning=false;}
+  };
+  void diagnose();setInterval(diagnose,300_000);
+}
 let publicationRunning = false;
 setInterval(async () => {
   if (publicationRunning) return;

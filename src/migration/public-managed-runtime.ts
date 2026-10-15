@@ -21,20 +21,19 @@ import {ManagedMigrationCompletion} from "./managed-completion.js";
 
 export function createPublicManagedRuntime(config:AppConfig,sql:SQL,plc:PlcDirectoryClient,
   repository:OnboardingRepository,encryptor:KeyEncryptor,transport:Pick<SafeHttpsTransport,"fetch"|"validateTarget">,
-  verifier:AddressVerificationService,readers?:readonly [IndependentPlcObserver,IndependentPlcObserver]) {
+  verifier:AddressVerificationService,readers?:readonly IndependentPlcObserver[]) {
   if(!config.publicManagedTransfer)return undefined;
   if(config.nodeEnv!=="production"||config.plcDirectoryUrl!=="https://plc.directory"||
     config.publicPlcAuthority?.profile!=="strict-public-v1"||config.pocManagedTransfer||
     config.publicPlcAuthority.providerOperators.length!==2)throw new Error("Public managed runtime requires production strict public authority without the private gate");
   const policy=config.publicPlcAuthority;
-  const observers=readers??[createIndependentPlcObserver(policy.readers[0].origin,policy.readers[0].operator),
-    createIndependentPlcObserver(policy.readers[1].origin,policy.readers[1].operator)] as const;
+  const observers=readers??policy.readers.map(reader=>createIndependentPlcObserver(reader.origin,reader.operator));
   assertPublicPlcReaders(observers,policy.providerOperators,[config.publicOrigin]);
   if(observers.some((observer,index)=>observer.origin!==policy.readers[index]!.origin||observer.operator!==policy.readers[index]!.operator))
     throw new Error("Injected public readers must match reviewed declarations");
   const resolver=new VerifiedPublicPlcResolver(sql,observers,policy.providerOperators,[config.publicOrigin]);
   const targetKeys=new PreparedMigrationTarget(sql,encryptor,config.hailServiceBase,true);
-  const gate=new PortableCutoverGate(sql,observers,undefined,policy.providerOperators,config.publicManagedTransfer);
+  const gate=new PortableCutoverGate(sql,observers,undefined,policy.providerOperators,config.publicManagedTransfer,plc);
   const activation=new ManagedMigrationActivation(sql,encryptor,resolver,verifier,config.hailServiceBase,
     config.plcDirectoryUrl,"strict-public-v1",undefined,gate);
   return {resolver,targetKeys,activation,gate,

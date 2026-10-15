@@ -72,14 +72,14 @@ it.skipIf(!process.env.DATABASE_URL)("fresh public reads bind exact accepted env
       expect(new Uint8Array(link.representation_digest)).toEqual(evidenceHash(bytes));
       const retained=(await db.sql<{bundle_bytes:Uint8Array}[]>`SELECT bundle_bytes FROM public_plc_resolution_evidence WHERE evidence_digest=${link.evidence_digest}`)[0]!.bundle_bytes;
       expect(evidenceHash(retained)).toEqual(new Uint8Array(link.evidence_digest));
-      expect((decodeDeterministic(retained,PUBLIC_EVIDENCE_LIMITS) as Record<string,any>).witnesses).toHaveLength(2);
+      expect((decodeDeterministic(retained,PUBLIC_EVIDENCE_LIMITS) as Record<string,any>).witnesses).toHaveLength(1);
     }
     expect(await receiver.receive(bytes)).toBe("duplicate");
     expect(await db.sql`SELECT authority_did FROM public_envelope_authority_evidence WHERE message_id=${first.message_id}`).toHaveLength(2);
     const offline=new VerifiedPublicPlcResolver(db.sql,[readers[0],{...readers[1],async audit(){throw new Error("Mirror down");}}],
       ["local-operator"],["https://local.example.com"]);
-    await expect(offline.resolve(sender.did)).rejects.toThrow("Mirror down");
-    expect(await new EnvelopeReceiver(new OnboardingRepository(db.sql),store,offline,"https://local.example.com/hail").receive(await sign(envelope()))).toBe("ignored");
+    await expect(offline.resolve(sender.did)).resolves.toMatchObject({did:sender.did});
+    expect(await new EnvelopeReceiver(new OnboardingRepository(db.sql),store,offline,"https://local.example.com/hail").receive(await sign(envelope()))).toBe("accepted");
     const oldKey=sender.messaging,next=await publicEdKey(),{sig,...unsigned}=sender.log.at(-1)!;
     sender.log.push(await signOperation({...unsigned,prev:(await cidForCbor(sender.log.at(-1)!)).toString(),
       verificationMethods:{...unsigned.verificationMethods,"hail-messaging":next.didKey}},sender.owner));sender.messaging=next;

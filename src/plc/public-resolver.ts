@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { encode as encodeDagCbor } from "@ipld/dag-cbor";
-import { encodeBase64Url, type HailValue } from "@hailproto/codec";
+import { decodeDeterministic, encodeBase64Url, type HailValue } from "@hailproto/codec";
+import { def, type ExportedOp } from "@did-plc/lib";
 import type { SQL } from "bun";
 import type { AppConfig } from "../config.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
@@ -9,7 +10,22 @@ import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js
 import { assertFreshPlcReaderHealth, assertPublicPlcReaders, createIndependentPlcObserver, type IndependentPlcObserver, type PublicPlcAuthorityConfig } from "./observers.js";
 import { canonicalizeHailServiceBase, PlcHailDidResolver, type HailDidResolver, type ResolvedHailDid } from "./resolver.js";
 import { createPlcDirectoryClient, withAbort } from "./client.js";
-import { encodePublicEvidence, evidenceHash, validatePlcReadEvidence } from "./read-evidence.js";
+import { encodePublicEvidence, evidenceHash, PUBLIC_EVIDENCE_LIMITS, validatePlcReadEvidence } from "./read-evidence.js";
+
+function assertNoHistoryRegression(previousBytes:Uint8Array,current:readonly ExportedOp[]):void{
+  const bundle=decodeDeterministic(previousBytes,PUBLIC_EVIDENCE_LIMITS) as Record<string,HailValue>;
+  const witnesses=bundle.witnesses;
+  if(!Array.isArray(witnesses)||!witnesses.length||!witnesses[0]||typeof witnesses[0]!=="object"||Array.isArray(witnesses[0]))
+    throw new Error("Retained PLC authority evidence has no audit history");
+  const rawAudit=(witnesses[0] as Record<string,HailValue>).audit;
+  if(!Array.isArray(rawAudit))throw new Error("Retained PLC authority evidence has no audit history");
+  const currentByCid=new Map(current.map(entry=>[entry.cid,entry]));
+  for(const value of rawAudit){
+    const prior=def.exportedOp.parse(value),next=currentByCid.get(prior.cid);
+    if(!next||prior.did!==next.did||prior.createdAt!==next.createdAt||!isDeepStrictEqual(prior.operation,next.operation)||
+      prior.nullified&&!next.nullified)throw new Error("PLC reader history regressed from retained evidence");
+  }
+}
 
 export function publicPlcAuthorityConfig(environment: Record<string,string|undefined>, registry: string, providerOrigin: string): PublicPlcAuthorityConfig | undefined {
   const profile = environment.PLC_AUTHORITY_PROFILE?.trim();
@@ -29,7 +45,7 @@ export function publicPlcAuthorityConfig(environment: Record<string,string|undef
 }
 
 export class VerifiedPublicPlcResolver implements HailDidResolver {
-  constructor(private readonly sql: SQL, private readonly readers: readonly [IndependentPlcObserver,IndependentPlcObserver],
+  constructor(private readonly sql: SQL, private readonly readers: readonly IndependentPlcObserver[],
     private readonly providerOperators: readonly string[], providerOrigins: readonly string[],
     private readonly now:()=>Date=()=>new Date(), private readonly timeoutMs=15_000) {
     assertPublicPlcReaders(readers,providerOperators,providerOrigins);
@@ -38,46 +54,57 @@ export class VerifiedPublicPlcResolver implements HailDidResolver {
 
   async resolve(did: string): Promise<ResolvedHailDid> {
     if (!/^did:plc:[a-z2-7]{24}$/.test(did)) throw new Error("DID is not canonical did:plc");
-    const signal=AbortSignal.timeout(this.timeoutMs),started=this.now();
-    const observations=await withAbort(Promise.all(this.readers.map(async reader=>{
-      if (!reader.health) throw new Error("Public PLC reader does not expose replica health");
-      const [resolved,audit,health]=await Promise.all([reader.resolver.resolve(did),reader.audit(did),reader.health()]);
-      assertFreshPlcReaderHealth(health,started);
-      const checked=await validatePlcReadEvidence(did,resolved.evidence,audit);
-      if(resolved.did!==did || resolved.identityDidKey!==checked.state.verificationMethods["hail-identity"] ||
-        resolved.messagingDidKey!==checked.state.verificationMethods["hail-messaging"] || resolved.identityDidKey===resolved.messagingDidKey ||
-        checked.state.services.hail?.type!=="HailMessaging" ||
-        resolved.serviceBase!==canonicalizeHailServiceBase(checked.state.services.hail.endpoint))throw new Error("Public PLC resolver roles/service disagree with verified full state");
-      await Promise.all([ed25519PublicKeyFromDidKey(resolved.identityDidKey),ed25519PublicKeyFromDidKey(resolved.messagingDidKey)]);
-      return {resolved,checked};
-    })),signal);
-    const [first,second]=observations;
-    if(!first||!second||!isDeepStrictEqual(first.checked,second.checked)||first.resolved.identityDidKey!==second.resolved.identityDidKey||
-      first.resolved.messagingDidKey!==second.resolved.messagingDidKey||first.resolved.serviceBase!==second.resolved.serviceBase) {
-      throw new Error("Public PLC readers disagree; no cached or single-reader fallback is permitted");
+    const signal=AbortSignal.timeout(this.timeoutMs),deadline=Date.now()+this.timeoutMs,started=this.now(),failures:unknown[]=[];
+    const previous=(await withAbort(this.sql<{bundle_bytes:Uint8Array}[]>`SELECT bundle_bytes FROM public_plc_resolution_evidence
+      WHERE did=${did} ORDER BY verified_at DESC LIMIT 1`,signal))[0];
+    let selected:{reader:IndependentPlcObserver;resolved:ResolvedHailDid;checked:Awaited<ReturnType<typeof validatePlcReadEvidence>>}|undefined;
+    for(const [index,reader] of this.readers.entries()){
+      const remaining=deadline-Date.now();
+      if(remaining<=0)break;
+      try{
+        selected=await withAbort((async()=>{
+          if (!reader.health) throw new Error("Public PLC reader does not expose replica health");
+          const [resolved,audit,health]=await Promise.all([reader.resolver.resolve(did),reader.audit(did),reader.health()]);
+          assertFreshPlcReaderHealth(health,started);
+          const checked=await validatePlcReadEvidence(did,resolved.evidence,audit);
+          if(previous)assertNoHistoryRegression(previous.bundle_bytes,checked.audit);
+          if(resolved.did!==did || resolved.identityDidKey!==checked.state.verificationMethods["hail-identity"] ||
+            resolved.messagingDidKey!==checked.state.verificationMethods["hail-messaging"] || resolved.identityDidKey===resolved.messagingDidKey ||
+            checked.state.services.hail?.type!=="HailMessaging" ||
+            resolved.serviceBase!==canonicalizeHailServiceBase(checked.state.services.hail.endpoint))throw new Error("Public PLC resolver roles/service disagree with verified full state");
+          await Promise.all([ed25519PublicKeyFromDidKey(resolved.identityDidKey),ed25519PublicKeyFromDidKey(resolved.messagingDidKey)]);
+          return {reader,resolved,checked};
+        })(),AbortSignal.timeout(Math.min(5_000,Math.max(1,Math.floor(remaining/(this.readers.length-index))))));
+        break;
+      }catch(error){failures.push(error);}
     }
+    if(!selected){if(failures.length===1)throw failures[0];throw new AggregateError(failures,"No configured PLC reader returned fresh valid evidence");}
+    const {reader,resolved,checked}=selected;
     const verifiedAt=this.now();
     if(!Number.isFinite(started.getTime())||verifiedAt.getTime()<started.getTime()||verifiedAt.getTime()-started.getTime()>this.timeoutMs)throw new Error("Public PLC verification clock/deadline is invalid");
     const bytes=encodePublicEvidence({type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",registry_origin:"https://plc.directory",
-      did,operation_cid:first.checked.operationCid,read_started_at:started.toISOString(),verified_at:verifiedAt.toISOString(),
+      did,operation_cid:checked.operationCid,read_started_at:started.toISOString(),verified_at:verifiedAt.toISOString(),
       provider_operators:[...this.providerOperators],
-      witnesses:observations.map((observation,index)=>({origin:this.readers[index]!.origin,operator:this.readers[index]!.operator!,
-        document:observation.resolved.evidence.document,state:observation.checked.state,log:observation.checked.log,audit:observation.checked.audit,
-        signed_operations:observation.checked.audit.map(entry=>({cid:entry.cid,dag_cbor:new Uint8Array(encodeDagCbor(entry.operation))}))})),
+      witnesses:[{origin:reader.origin,operator:reader.operator!,document:resolved.evidence.document,state:checked.state,log:checked.log,audit:checked.audit,
+        signed_operations:checked.audit.map(entry=>({cid:entry.cid,dag_cbor:new Uint8Array(encodeDagCbor(entry.operation))}))}],
     } as unknown as HailValue);
     const digest=evidenceHash(bytes);
     await withAbort(this.sql.begin(async tx=>{
       signal.throwIfAborted();
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${did},0))`;
+      const lockedPrevious=(await tx<{bundle_bytes:Uint8Array}[]>`SELECT bundle_bytes FROM public_plc_resolution_evidence
+        WHERE did=${did} ORDER BY verified_at DESC LIMIT 1`)[0];
+      if(lockedPrevious)assertNoHistoryRegression(lockedPrevious.bundle_bytes,checked.audit);
       await tx`INSERT INTO public_plc_resolution_evidence
         (evidence_digest,did,operation_cid,verified_at,bundle_bytes,record_version,read_evidence_policy_version)
-        VALUES(${digest},${did},${first.checked.operationCid},${verifiedAt},${bytes},1,${PLC_READ_EVIDENCE_POLICY_VERSION})
+        VALUES(${digest},${did},${checked.operationCid},${verifiedAt},${bytes},1,${PLC_READ_EVIDENCE_POLICY_VERSION})
         ON CONFLICT(evidence_digest) DO NOTHING`;
       const retained=(await tx<{bundle_bytes:Uint8Array}[]>`SELECT bundle_bytes FROM public_plc_resolution_evidence WHERE evidence_digest=${digest}`)[0];
       if(!retained||!Buffer.from(retained.bundle_bytes).equals(Buffer.from(bytes)))throw new Error("Retained public PLC resolution conflicts");
       signal.throwIfAborted();
     }),signal);
-    return {...first.resolved,evidence:{...first.resolved.evidence,verification:{profile:"strict-public-v1",digest:encodeBase64Url(digest),
-      operationCid:first.checked.operationCid,verifiedAt:verifiedAt.toISOString()}}};
+    return {...resolved,evidence:{...resolved.evidence,verification:{profile:"strict-public-v1",digest:encodeBase64Url(digest),
+      operationCid:checked.operationCid,verifiedAt:verifiedAt.toISOString()}}};
   }
 }
 
@@ -85,6 +112,6 @@ export function createHailDidResolver(config: Pick<AppConfig,"plcDirectoryUrl"|"
   const policy=config.publicPlcAuthority;
   if(!policy)return new PlcHailDidResolver(createPlcDirectoryClient(config.plcDirectoryUrl));
   if(config.plcDirectoryUrl!=="https://plc.directory")throw new Error("Public PLC authority cannot use a private write registry");
-  return new VerifiedPublicPlcResolver(sql,[createIndependentPlcObserver(policy.readers[0].origin,policy.readers[0].operator),
-    createIndependentPlcObserver(policy.readers[1].origin,policy.readers[1].operator)],policy.providerOperators,[config.publicOrigin]);
+  return new VerifiedPublicPlcResolver(sql,policy.readers.map(reader=>createIndependentPlcObserver(reader.origin,reader.operator)),
+    policy.providerOperators,[config.publicOrigin]);
 }

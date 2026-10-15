@@ -202,7 +202,7 @@ export class PublicOnboarding {
       const strict = await this.resolver.resolve(did);
       if (strict.evidence.verification?.operationCid !== operationCid || strict.identityDidKey !== prepared.owner_identity_public_key ||
         strict.messagingDidKey !== prepared.provider_messaging_public_key || strict.serviceBase !== this.serviceBase) {
-        throw new Error("Independent public readers do not confirm exact genesis authority");
+        throw new Error("Validated public reader does not confirm exact genesis authority");
       }
       await repository.markDidRegistered(accountId, readback);
       account = await repository.getAccount(accountId);

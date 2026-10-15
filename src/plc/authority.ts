@@ -19,7 +19,7 @@ export async function requireFreshPublicAuthority(sql:SQL,evidence:PlcResolution
     !Buffer.from(evidenceHash(row.bundle_bytes)).equals(Buffer.from(digest)))throw new Error("Public authority evidence is missing or mismatched");
   const bundle=decodeDeterministic(row.bundle_bytes,PUBLIC_EVIDENCE_LIMITS) as Record<string,HailValue>,witnesses=bundle.witnesses as Record<string,any>[];
   if(bundle.type!=="hail.public-plc-resolution"||bundle.version!==1||bundle.policy!=="strict-public-v1"||bundle.did!==expected.did||
-    bundle.operation_cid!==ref.operationCid||bundle.verified_at!==ref.verifiedAt||!Array.isArray(witnesses)||witnesses.length!==2||
+    bundle.operation_cid!==ref.operationCid||bundle.verified_at!==ref.verifiedAt||!Array.isArray(witnesses)||witnesses.length<1||witnesses.length>2||
     witnesses.some(witness=>expected.role&&witness.state.verificationMethods[expected.role]!==expected.key||
       expected.serviceBase&&canonicalizeHailServiceBase(witness.state.services.hail.endpoint)!==expected.serviceBase))throw new Error("Public authority decision does not match retained roles/service");
   return digest;

@@ -80,9 +80,9 @@ new proof is retained; older public activations are not retroactively supplied
 with fabricated evidence. See [retention proof](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone7-production-gate.md#durable-provider-cutover-evidence-slice-migration-40).
 
 Migration **41** adds an opt-in routine `strict-public-v1` resolver and immutable
-resolution/envelope-authority history. It uses fresh complete agreement from both
-readers on every call, with no result cache or degraded fallback, and persists
-the read bundle before returning keys. Inbound envelope admission binds both
+resolution/envelope-authority history. It uses the first fresh, completely
+validated configured reader, tries later readers only as availability fallbacks,
+and persists the selected read bundle before returning keys. Inbound envelope admission binds both
 authority digests to the exact signed representation atomically; stale (>30 s),
 mixed or mismatched evidence cannot enqueue work. Other services use the same
 resolver. Migrations 42-43 add action-bound Grant, binding, profile and status history.
@@ -96,7 +96,7 @@ PLC_PROVIDER_OPERATORS=["provider-operator"]
 
 These are configuration examples, not independently verified operators/hosts.
 The supported read-replica API may return either `application/did+json` or
-`application/did+ld+json`. Strict public reads also require each replica's
+`application/did+ld+json`. Strict public reads require the selected replica's
 `/_health` `lastCommittedOpTime` to be within five minutes. To exercise both
 currently known public replica implementations with a public Hail-profile DID:
 
@@ -104,12 +104,17 @@ currently known public replica implementations with a public Hail-profile DID:
 PUBLIC_PLC_SMOKE_DID=did:plc:... bun run test:plc-live
 ```
 
-Reader/operator declarations must be distinct and outside the provider. Absence
+One to three ordered reader/operator declarations may be configured; declarations
+must be distinct and outside the provider. Absence
 of the authority profile preserves the POC baseline; orphaned/invalid public
 declarations are refused. Use one consistent runtime for all serving/worker/tools
 when enabling strict authority; existing public writers do not gain verified
 evidence merely because schema 41 is installed. Normal operator CLIs and address
 discovery share the factory; private-POC commands retain their registry guard.
+The server checks configured reader health every five minutes and logs only the
+initial result and state changes. Set `PLC_READER_DIAGNOSTIC_DID` to a public
+Hail-profile DID to also log reader state disagreement; leave it unset until a
+reviewed public canary exists.
 Prototype operator `onboard` and `activate:local/public` remain private/legacy tools
 and refuse strict mode. Set `PUBLIC_SELF_SERVICE_ONBOARDING=true` only with the strict
 profile to enable the migration-44 owner-key/monitor HTTP ceremony; do not also enable
@@ -119,7 +124,7 @@ Migration **44** retains public preparations separately from private-POC records
 The owner signs the exact genesis with top recovery authority; registration writes
 only to `https://plc.directory`, reconciles ambiguous responses, and returns the exact
 DID/CID for reviewed monitor enrollment. A retry carrying the genesis-specific monitor
-attestation atomically seals custody, strict two-reader evidence, selected binding and
+attestation atomically seals custody, fresh validated reader evidence, selected binding and
 activation before issuing credentials. Guarded rollback refuses retained preparations
 or evidence. This is implementation evidence, not proof that configured readers,
 monitor, backup or alert infrastructure are independently operated.
@@ -346,7 +351,7 @@ strict-public operation.
 
 The separate `PUBLIC_MANAGED_TRANSFER` runtime is **disabled by default**. It
 requires `NODE_ENV=production`, `PLC_DIRECTORY_URL=https://plc.directory`,
-`PLC_AUTHORITY_PROFILE=strict-public-v1`, two reviewed `PLC_PUBLIC_READERS`, and
+`PLC_AUTHORITY_PROFILE=strict-public-v1`, one to three reviewed `PLC_PUBLIC_READERS`, and
 both source/destination operators in `PLC_PROVIDER_OPERATORS`. All private account
 access, onboarding, transfer, return and schema-rehearsal gates must be off.
 `PLC_MANAGED_MONITOR_ORIGIN` and `PLC_MANAGED_MONITOR_PUBLIC_KEY` pin the independent
@@ -354,11 +359,12 @@ HTTPS monitor and its Ed25519 `did:key`; orphan declarations fail startup. Enabl
 this flag is not permission to skip the remaining operational/public canary gates.
 
 This runtime wires owner-recovery account access, managed APIs/routes/workers,
-fresh two-reader resolution, and the existing full public cutover evidence policy.
+and ordered validated reader fallback for routine resolution and public cutover.
 Public staging rejects private registration history before submission. Activation
-requires a reviewed bootstrap v2 monitor report, independent matching readers,
+requires a reviewed bootstrap v2 monitor report, a fresh validated reader,
 exact destination roles/state, and retained evidence selected/sealed atomically
-with ownership. Missing, stale, invalid, gapped or disagreeing evidence blocks
+with ownership. The exact current operation/state is also read back directly
+from canonical `plc.directory`. Missing, stale, invalid or gapped evidence blocks
 activation; an activated retry verifies retained evidence and current authority.
 
 Public completion uses the same `/transfers/managed-completions` endpoint in two
