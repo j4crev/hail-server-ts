@@ -157,7 +157,7 @@ integration("same-provider custody changes are owner-approved, retryable and ato
     const reversePreparedResponse=await app.request("https://local.example.com/api/v1/account/custody/owner-controlled",{method:"POST",
       headers:{Authorization:`Bearer ${reverseToken}`,"Content-Type":"application/json"},body:JSON.stringify({newIdentityKey:nextIdentity.didKey,
         binding:encodeBase64Url(ownerBinding),grants:ownerGrants.map(value=>({grantId:value.grantId,cose:encodeBase64Url(value.cose)}))})});
-    expect(reversePreparedResponse.status).toBe(200);
+    expect(reversePreparedResponse.status,await reversePreparedResponse.clone().text()).toBe(200);
     const reverse=await service.prepareOwner(prepared.accountId,nextIdentity.didKey,ownerBinding,ownerGrants);
     expect(reverse.direction).toBe("managed-to-owner");expect(reverse.generationFrom).toBe(2);
     const reverseOperation=await signOperation(reverse.unsignedOperation,owner),reverseBytes=new TextEncoder().encode(JSON.stringify(reverseOperation));

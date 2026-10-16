@@ -141,7 +141,7 @@ integration.each(["poc-local","strict-public-v1"] as const)("materializes an exa
       async health(){return {lastCommittedOpTime:new Date().toISOString()};},
       resolver:{async resolve(value:string){if(readerFailure&&name==="two")throw new Error("reader outage");const result=await rawResolver.resolve(value);
         return readerDisagreement&&name==="two"?{...result,serviceBase:sourceBase}:result;}},
-      async audit(){return Promise.all(plcLog.map(async operation=>({did,cid:(await cidForCbor(operation)).toString(),operation,
+       async audit(){if(readerFailure)throw new Error("reader outage");return Promise.all(plcLog.map(async operation=>({did,cid:(await cidForCbor(operation)).toString(),operation,
         nullified:false,createdAt:auditCreatedAt})));}})) as unknown as
       readonly [import("../src/plc/observers.js").IndependentPlcObserver,import("../src/plc/observers.js").IndependentPlcObserver];
     const resolver=profile==="strict-public-v1"?new VerifiedPublicPlcResolver(source.sql,readers,["provider-a","provider-b"],[sourceOrigin,"https://b.example.com"]):rawResolver;
@@ -394,9 +394,9 @@ integration.each(["poc-local","strict-public-v1"] as const)("materializes an exa
     const disagreeing={async resolve(value:string){return {...await resolver.resolve(value),serviceBase:sourceBase};}};
     await expect(new ManagedMigrationPlcSubmission(target.sql,plc,disagreeing,targetBase).submit(offer.transfer_id))
       .rejects.toThrow(/Validated public reader/);
-    const destinationState=(await validateOperationLog(did,plcLog))!,verifiedAt=new Date().toISOString();
+    const destinationState=(await validateOperationLog(did,plcLog))!,verifiedAt=new Date().toISOString(),retainedAudit=await readers[0].audit(did);
     const bundle=encodeDeterministic({type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",did,
-      operation_cid:cutoverCid,verified_at:verifiedAt,witnesses:[{state:destinationState},{state:destinationState}]} as unknown as HailValue),
+      operation_cid:cutoverCid,verified_at:verifiedAt,witnesses:[{state:destinationState,audit:retainedAudit}]} as unknown as HailValue),
       evidenceDigest=new Uint8Array(createHash("sha256").update(bundle).digest());
     await target.sql`INSERT INTO public_plc_resolution_evidence
       (evidence_digest,did,operation_cid,verified_at,bundle_bytes,record_version,read_evidence_policy_version)
@@ -425,8 +425,7 @@ integration.each(["poc-local","strict-public-v1"] as const)("materializes an exa
         const bad=await signMonitorAttestation({...report,...overrides},monitorPair.privateKey);
         await expect(activation.activate(offer.transfer_id,bad)).rejects.toThrow();
       }
-      readerFailure=true;await expect(activation.activate(offer.transfer_id,monitorSigned)).rejects.toThrow(/outage/);readerFailure=false;
-      readerDisagreement=true;await expect(activation.activate(offer.transfer_id,monitorSigned)).rejects.toThrow(/Mirror/);readerDisagreement=false;
+      readerFailure=true;await expect(activation.activate(offer.transfer_id,monitorSigned)).rejects.toThrow(/No configured PLC reader/);readerFailure=false;
       expect(await target.sql`SELECT 1 FROM public_cutover_evidence`).toHaveLength(0);
       expect(await target.sql`SELECT 1 FROM provider_accounts WHERE id=${accountId}`).toHaveLength(0);
     }
@@ -445,12 +444,12 @@ integration.each(["poc-local","strict-public-v1"] as const)("materializes an exa
       "https://b.example.com/.well-known/hail/transfers/managed-completions",{method:"POST",
         headers:{"Content-Type":TRANSFER_MEDIA_TYPE},body:completionBody}));
     phase="completion route retries";
-    const completed=await complete();expect(completed.status).toBe(200);expect(await completed.json()).toMatchObject({
+    const completed=await complete();if(completed.status!==200)throw new Error(await completed.text());expect(await completed.json()).toMatchObject({
       type:"hailp.managed-transfer-completion",did,accountId,transferId:offer.transfer_id,generation:2,phase:"active"});
     if(publicRuntime)expect(await target.sql`SELECT 1 FROM public_cutover_evidence_selection WHERE transfer_id=${offer.transfer_id} AND activated_at IS NOT NULL`).toHaveLength(1);
     expect((await complete()).status).toBe(200);
     if(publicRuntime) {
-      readerFailure=true;await expect(activation.activate(offer.transfer_id)).rejects.toThrow(/outage/);readerFailure=false;
+      readerFailure=true;await expect(activation.activate(offer.transfer_id)).rejects.toThrow(/No configured PLC reader/);readerFailure=false;
       await expect(target.sql`DELETE FROM public_cutover_evidence`).rejects.toThrow(/immutable/);
       expect(await target.sql`SELECT 1 FROM managed_custody_evidence WHERE account_id=${accountId} AND verification_mode='strict-public-v1'`).toHaveLength(1);
     }
@@ -567,9 +566,9 @@ integration.each(["poc-local","strict-public-v1"] as const)("materializes an exa
     const returnStager=new ManagedMigrationStageService(source.sql,resolver,returnTarget,sourceBase,()=>returnNow,profile);
     expect(await returnStager.stage(returnExport,returnApproval,returnCutoverBytes)).toEqual(returnManifest);
     await expect(new ManagedMigrationPlcSubmission(source.sql,plc,resolver,sourceBase).submit(returnTransfer)).resolves.toBe(returnCid);
-    const returnState=(await validateOperationLog(did,plcLog))!,returnVerifiedAt=new Date().toISOString(),returnBundle=encodeDeterministic({
+    const returnState=(await validateOperationLog(did,plcLog))!,returnVerifiedAt=new Date().toISOString(),returnAudit=await readers[0].audit(did),returnBundle=encodeDeterministic({
       type:"hail.public-plc-resolution",version:1,policy:"strict-public-v1",did,operation_cid:returnCid,verified_at:returnVerifiedAt,
-      witnesses:[{state:returnState},{state:returnState}]} as unknown as HailValue),
+      witnesses:[{state:returnState,audit:returnAudit}]} as unknown as HailValue),
       returnEvidenceDigest=new Uint8Array(createHash("sha256").update(returnBundle).digest());
     await source.sql`INSERT INTO public_plc_resolution_evidence
       (evidence_digest,did,operation_cid,verified_at,bundle_bytes,record_version,read_evidence_policy_version)

@@ -272,7 +272,7 @@ export class PublicOnboarding {
           VALUES (${accountId}, ${account.did}, ${genesis.operationCid},
             ${new Uint8Array(createHash("sha256").update(genesis.operationBytes).digest())}, ${binding.digest}, ${plcDigest},
             ${prepared.monitor_origin}, ${prepared.monitor_public_key}, ${signed.payloadBytes}, ${signed.signature},
-            ${monitor.bootstrap_state_digest}, ${monitor.export_sequence}, ${now}, 1, ${PLC_READ_EVIDENCE_POLICY_VERSION})`;
+            ${monitor.bootstrap_state_digest}, ${monitor.export_sequence??null}, ${now}, 1, ${PLC_READ_EVIDENCE_POLICY_VERSION})`;
         const activated = await tx`UPDATE provider_accounts AS account SET onboarding_state='active', activated_at=${now},
           activation_binding_digest=${binding.digest}, activation_verification_mode='public', activation_attempt_id=NULL,
           state_version=state_version+1, updated_at=${now} FROM address_bindings AS selected

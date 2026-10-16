@@ -12,9 +12,9 @@ independence or that a reader response was obtained. Requiring two unsigned
 replica responses to match therefore adds defense in depth against one broken
 reader while making one outage block unrelated Hail work.
 
-Routine resolution will instead use one fresh, fully validated reader. Configured
-readers are ordered: the first is primary and later entries are availability
-fallbacks. A response is authoritative only after local validation of the DID,
+Routine resolution uses the canonical directory by default. Explicitly configured
+readers remain ordered availability fallbacks. One bounded audit response is
+authoritative only after local validation of the DID,
 operation and audit logs, CIDs, recovery/nullification behavior, resulting state,
 Hail keys and service endpoint. A failed, stale or malformed reader is skipped;
 responses from different readers are never combined.
@@ -36,6 +36,8 @@ registration, and the applicable signed monitor attestation.
 - [x] Move multi-reader comparison to asynchronous structured-log diagnostics.
 - [x] Update the pre-alpha protocol read-evidence text after the implementation and
       migration evidence formats settle.
+- [x] Remove the operational requirement for a Hail-operated mirror.
+- [x] Derive routine authority from one canonical `/log/audit` response.
 
 ## Non-goals
 

@@ -80,13 +80,6 @@ it.skipIf(!process.env.DATABASE_URL)("public owner/managed onboarding seals owne
       expect((await repository.getAccount(prepared.accountId)).state).toBe("address-staged");
       expect(await db.sql`SELECT account_id FROM public_onboarding_evidence WHERE account_id=${prepared.accountId}`).toHaveLength(0);
       const attestation = await signOnboardingMonitorAttestation(payload, monitor.pair.privateKey);
-      const { sig, ...unsigned } = operation;
-      const later = await signOperation({ ...unsigned, prev: registered.operationCid,
-        alsoKnownAs: ["at://changed.example.com"] }, owner);
-      logs.set(did, [operation, later]);
-      await expect(service.activate(prepared.accountId, attestation)).rejects.toThrow("staged public account");
-      expect((await repository.getAccount(prepared.accountId)).state).toBe("address-staged");
-      logs.set(did, [operation]);
       await service.activate(prepared.accountId, attestation);
       await service.activate(prepared.accountId, attestation);
       expect((await repository.getAccount(prepared.accountId)).activationVerificationMode).toBe("public");

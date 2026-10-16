@@ -59,7 +59,7 @@ destination after transfer.
 
 Milestone 7's candidate [PLC read-evidence policy](https://github.com/j4crev/hailproto/blob/main/spec/plc-read-evidence.md)
 strengthens the public cutover library with complete canonical/audit agreement,
-explicit independent-reader/operator configuration, reviewed v2 monitor bootstrap
+explicit reader/operator configuration, reviewed monitor bootstrap
 evidence and five-minute freshness. Use `createIndependentPlcObserver(origin,
 operator)` and pass the reviewed source/destination operator IDs as the fourth
 `PortableCutoverGate` constructor argument. Legacy v1 monitor reports, private
@@ -80,8 +80,9 @@ new proof is retained; older public activations are not retroactively supplied
 with fabricated evidence. See [retention proof](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone7-production-gate.md#durable-provider-cutover-evidence-slice-migration-40).
 
 Migration **41** adds an opt-in routine `strict-public-v1` resolver and immutable
-resolution/envelope-authority history. It uses the first fresh, completely
-validated configured reader, tries later readers only as availability fallbacks,
+resolution/envelope-authority history. It defaults to one canonical
+`https://plc.directory/log/audit` read, replays the complete DID history locally,
+tries explicitly configured replicas only as availability fallbacks,
 and persists the selected read bundle before returning keys. Inbound envelope admission binds both
 authority digests to the exact signed representation atomically; stale (>30 s),
 mixed or mismatched evidence cannot enqueue work. Other services use the same
@@ -90,14 +91,16 @@ resolver. Migrations 42-43 add action-bound Grant, binding, profile and status h
 ```dotenv
 PLC_DIRECTORY_URL=https://plc.directory
 PLC_AUTHORITY_PROFILE=strict-public-v1
-PLC_PUBLIC_READERS=[{"origin":"https://reader-one.example.com","operator":"reader-one"},{"origin":"https://reader-two.example.com","operator":"reader-two"}]
 PLC_PROVIDER_OPERATORS=["provider-operator"]
 ```
 
-These are configuration examples, not independently verified operators/hosts.
+`PLC_PUBLIC_READERS` is optional. When omitted, the canonical directory is the
+only read source. When present, its declarations are configuration metadata, not
+independently verified operators/hosts.
 The supported read-replica API may return either `application/did+json` or
-`application/did+ld+json`. Strict public reads require the selected replica's
-`/_health` `lastCommittedOpTime` to be within five minutes. To exercise both
+`application/did+ld+json`. A selected noncanonical replica must expose a
+`/_health` `lastCommittedOpTime` to be within five minutes. Canonical health does
+not claim replica freshness; the bounded audit read is validated directly. To exercise both
 currently known public replica implementations with a public Hail-profile DID:
 
 ```bash

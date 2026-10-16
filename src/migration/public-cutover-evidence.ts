@@ -48,9 +48,13 @@ export async function requirePublicCutoverEvidence(sql: SQL, expected: {
   const canonicalLog=canonical.log.map(operation=>def.compatibleOpOrTombstone.parse(operation));
   const canonicalState=def.documentData.parse(canonical.state),replayed=await validateOperationLog(expected.did,canonicalLog),
     canonicalCids=await Promise.all(canonicalLog.map(operation=>cidForCbor(operation).then(cid=>cid.toString())));
-  if(!replayed||canonicalCids.at(-1)!==row.operation_cid||typeof bootstrap?.operation_cid!=="string"||
-    !canonicalCids.includes(bootstrap.operation_cid)||!isDeepStrictEqual(replayed,canonicalState)||
-    !isDeepStrictEqual(canonicalState,witnesses[0]!.state))throw new Error("Retained canonical PLC readback is invalid");
+  if(!replayed)throw new Error("Retained canonical PLC readback log is invalid");
+  if(canonicalCids.at(-1)!==row.operation_cid)throw new Error("Retained canonical PLC readback head is invalid");
+  if(typeof bootstrap?.operation_cid!=="string"||!canonicalCids.includes(bootstrap.operation_cid))
+    throw new Error("Retained canonical PLC readback omits the bootstrap");
+  if(!isDeepStrictEqual(replayed,canonicalState))throw new Error("Retained canonical PLC readback state is invalid");
+  if(!isDeepStrictEqual(canonicalState,def.documentData.parse(witnesses[0]!.state)))
+    throw new Error("Retained canonical PLC readback disagrees with its witness");
   const report = await verifyMonitorAttestation({ payloadBytes: monitor.payload, signature: monitor.signature },
     monitor.public_key as string, Math.floor(row.verified_at.getTime() / 1000), 300);
   if (report.version !== 2 || report.did !== expected.did || report.transfer_id !== expected.transferId ||

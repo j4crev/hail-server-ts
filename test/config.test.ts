@@ -21,6 +21,8 @@ describe("loadConfig", () => {
     PLC_PROVIDER_OPERATORS:JSON.stringify(["provider-operator"])};
   it("selects strict public authority explicitly and preserves the default POC configuration",()=>{
     expect(loadConfig(publicEnvironment).publicPlcAuthority).toMatchObject({profile:"strict-public-v1",providerOperators:["provider-operator"]});
+    expect(loadConfig({...publicEnvironment,PLC_PUBLIC_READERS:undefined}).publicPlcAuthority?.readers)
+      .toEqual([{origin:"https://plc.directory",operator:"plc-directory"}]);
     expect(loadConfig({...publicEnvironment,PLC_PUBLIC_READERS:JSON.stringify([
       {origin:"https://reader-one.example.com",operator:"reader-one"}])}).publicPlcAuthority?.readers).toHaveLength(1);
     expect(loadConfig(validEnvironment).publicPlcAuthority).toBeUndefined();

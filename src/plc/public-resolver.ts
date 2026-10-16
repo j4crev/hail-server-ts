@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { encode as encodeDagCbor } from "@ipld/dag-cbor";
 import { decodeDeterministic, encodeBase64Url, type HailValue } from "@hailproto/codec";
-import { def, type ExportedOp } from "@did-plc/lib";
+import { def, formatDidDoc, type ExportedOp } from "@did-plc/lib";
 import type { SQL } from "bun";
 import type { AppConfig } from "../config.js";
 import { parseJsonWithoutDuplicateKeys } from "../discovery/strict-json.js";
@@ -10,7 +10,7 @@ import { PLC_READ_EVIDENCE_POLICY_VERSION } from "../identity/managed-profile.js
 import { assertFreshPlcReaderHealth, assertPublicPlcReaders, createIndependentPlcObserver, type IndependentPlcObserver, type PublicPlcAuthorityConfig } from "./observers.js";
 import { canonicalizeHailServiceBase, PlcHailDidResolver, type HailDidResolver, type ResolvedHailDid } from "./resolver.js";
 import { createPlcDirectoryClient, withAbort } from "./client.js";
-import { encodePublicEvidence, evidenceHash, PUBLIC_EVIDENCE_LIMITS, validatePlcReadEvidence } from "./read-evidence.js";
+import { encodePublicEvidence, evidenceHash, PUBLIC_EVIDENCE_LIMITS, validatePlcAudit } from "./read-evidence.js";
 
 function assertNoHistoryRegression(previousBytes:Uint8Array,current:readonly ExportedOp[]):void{
   const bundle=decodeDeterministic(previousBytes,PUBLIC_EVIDENCE_LIMITS) as Record<string,HailValue>;
@@ -35,7 +35,9 @@ export function publicPlcAuthorityConfig(environment: Record<string,string|undef
   }
   if (profile !== "strict-public-v1" || registry !== "https://plc.directory") throw new Error("Strict public PLC authority requires the canonical public registry and an explicit supported profile");
   if ((environment.PLC_PUBLIC_READERS?.length ?? 0)>8192 || (environment.PLC_PROVIDER_OPERATORS?.length ?? 0)>8192) throw new Error("Public reader configuration exceeds its bound");
-  const readers = parseJsonWithoutDuplicateKeys(environment.PLC_PUBLIC_READERS ?? "null");
+  const readers = environment.PLC_PUBLIC_READERS
+    ? parseJsonWithoutDuplicateKeys(environment.PLC_PUBLIC_READERS)
+    : [{origin:"https://plc.directory",operator:"plc-directory"}];
   const providers = parseJsonWithoutDuplicateKeys(environment.PLC_PROVIDER_OPERATORS ?? "null");
   if (!Array.isArray(readers) || readers.some(reader => !reader || typeof reader !== "object" || Array.isArray(reader) ||
     Object.keys(reader).length !== 2 || typeof reader.origin !== "string" || typeof reader.operator !== "string") ||
@@ -57,21 +59,24 @@ export class VerifiedPublicPlcResolver implements HailDidResolver {
     const signal=AbortSignal.timeout(this.timeoutMs),deadline=Date.now()+this.timeoutMs,started=this.now(),failures:unknown[]=[];
     const previous=(await withAbort(this.sql<{bundle_bytes:Uint8Array}[]>`SELECT bundle_bytes FROM public_plc_resolution_evidence
       WHERE did=${did} ORDER BY verified_at DESC LIMIT 1`,signal))[0];
-    let selected:{reader:IndependentPlcObserver;resolved:ResolvedHailDid;checked:Awaited<ReturnType<typeof validatePlcReadEvidence>>}|undefined;
+    let selected:{reader:IndependentPlcObserver;resolved:ResolvedHailDid;checked:Awaited<ReturnType<typeof validatePlcAudit>>}|undefined;
     for(const [index,reader] of this.readers.entries()){
       const remaining=deadline-Date.now();
       if(remaining<=0)break;
       try{
         selected=await withAbort((async()=>{
-          if (!reader.health) throw new Error("Public PLC reader does not expose replica health");
-          const [resolved,audit,health]=await Promise.all([reader.resolver.resolve(did),reader.audit(did),reader.health()]);
-          assertFreshPlcReaderHealth(health,started);
-          const checked=await validatePlcReadEvidence(did,resolved.evidence,audit);
+          const [audit,health]=await Promise.all([reader.audit(did),reader.health?.()]);
+          if(reader.origin!=="https://plc.directory")assertFreshPlcReaderHealth(health,started);
+          const checked=await validatePlcAudit(did,audit),service=checked.state.services.hail;
+          const resolved:ResolvedHailDid={did,identityDidKey:checked.state.verificationMethods["hail-identity"]!,
+            messagingDidKey:checked.state.verificationMethods["hail-messaging"]!,
+            serviceBase:canonicalizeHailServiceBase(service?.endpoint??""),
+            evidence:{document:formatDidDoc(checked.state),data:checked.state,log:checked.log}};
           if(previous)assertNoHistoryRegression(previous.bundle_bytes,checked.audit);
           if(resolved.did!==did || resolved.identityDidKey!==checked.state.verificationMethods["hail-identity"] ||
             resolved.messagingDidKey!==checked.state.verificationMethods["hail-messaging"] || resolved.identityDidKey===resolved.messagingDidKey ||
-            checked.state.services.hail?.type!=="HailMessaging" ||
-            resolved.serviceBase!==canonicalizeHailServiceBase(checked.state.services.hail.endpoint))throw new Error("Public PLC resolver roles/service disagree with verified full state");
+            service?.type!=="HailMessaging" || resolved.serviceBase!==canonicalizeHailServiceBase(service.endpoint))
+            throw new Error("Public PLC resolver roles/service disagree with verified full state");
           await Promise.all([ed25519PublicKeyFromDidKey(resolved.identityDidKey),ed25519PublicKeyFromDidKey(resolved.messagingDidKey)]);
           return {reader,resolved,checked};
         })(),AbortSignal.timeout(Math.min(5_000,Math.max(1,Math.floor(remaining/(this.readers.length-index))))));

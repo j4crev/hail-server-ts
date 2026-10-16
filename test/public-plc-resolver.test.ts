@@ -37,6 +37,15 @@ it("uses one validated reader and falls back from failed, stale, malformed or st
     .resolve(fixture.did)).resolves.toMatchObject({did:fixture.did});
 });
 
+it("resolves the canonical directory from one audit read without replica freshness metadata",async()=>{
+  const fixture=await publicPlcFixture(),reader=publicPlcReaders([fixture])[0],resolve=vi.fn(async()=>{throw new Error("unused");}),
+    audit=vi.fn(reader.audit),{sql}=recordingSql();
+  await expect(new VerifiedPublicPlcResolver(sql,[{...reader,origin:"https://plc.directory",operator:"plc-directory",
+    resolver:{resolve},audit,health:async()=>({version:"test"})}], ["provider"],["https://local.example.com"])
+    .resolve(fixture.did)).resolves.toMatchObject({did:fixture.did});
+  expect(audit).toHaveBeenCalledOnce();expect(resolve).not.toHaveBeenCalled();
+});
+
 it("refuses authority when every configured reader fails",async()=>{
   const fixture=await publicPlcFixture(),readers=publicPlcReaders([fixture]),{sql,begin}=recordingSql();
   const failed=readers.map(reader=>({...reader,async audit(){throw new Error("Reader outage");}}));

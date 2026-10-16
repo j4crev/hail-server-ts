@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { cidForCbor } from "@atproto/common";
-import { def, validateOperationLog } from "@did-plc/lib";
-import { plcStateDigest, validatePlcReadEvidence } from "../plc/read-evidence.js";
+import { def, formatDidDoc, validateOperationLog } from "@did-plc/lib";
+import { plcStateDigest, validatePlcAudit } from "../plc/read-evidence.js";
 import type { SQL } from "bun";
 import { assertFreshPlcReaderHealth, assertPublicPlcReaders, type IndependentPlcObserver } from "../plc/observers.js";
 export { createIndependentPlcObserver, type IndependentPlcObserver } from "../plc/observers.js";
@@ -65,23 +65,22 @@ export class PortableCutoverGate {
     const now = this.now();
     const report = await verifyMonitorAttestation(monitor, custody.monitor_public_key as string,
       Math.floor(now.getTime() / 1000), 300);
-    if (report.version !== 2) throw new Error("Public cutover requires a reviewed bootstrap v2 monitor attestation");
+    if (report.version !== 2&&report.version!==3) throw new Error("Public cutover requires a reviewed bootstrap monitor attestation");
     if (report.did !== manifest.did || report.transfer_id !== transferId ||
       report.monitor_origin !== custody.monitor_origin) throw new Error("Independent monitor covers another transfer");
     const providerHosts = [manifest.sourceServiceBase, manifest.destinationServiceBase].map(base => new URL(base).hostname);
     if (providerHosts.includes(new URL(report.monitor_origin).hostname)) throw new Error("Public monitor cannot be provider-operated");
     assertPublicPlcReaders(this.observers,this.providerOperators,[manifest.sourceServiceBase,manifest.destinationServiceBase]);
     const deadline=Date.now()+15_000,failures:unknown[]=[];
-    let observation:{observer:IndependentPlcObserver;checked:Awaited<ReturnType<typeof validatePlcReadEvidence>>;
+    let observation:{observer:IndependentPlcObserver;checked:Awaited<ReturnType<typeof validatePlcAudit>>;
       document:object;bootstrapState:NonNullable<Awaited<ReturnType<typeof validateOperationLog>>>}|undefined;
     for(const [index,observer] of this.observers.entries()){
       const remaining=deadline-Date.now();if(remaining<=0)break;
       try{
         observation=await withAbort((async()=>{
-          if (!observer.health) throw new Error("Public PLC reader does not expose replica health");
-          const [resolved,audit,health]=await Promise.all([observer.resolver.resolve(manifest.did),observer.audit(manifest.did),observer.health()]);
-          assertFreshPlcReaderHealth(health,now);
-          const checked=await validatePlcReadEvidence(manifest.did,resolved.evidence,audit);
+          const [audit,health]=await Promise.all([observer.audit(manifest.did),observer.health?.()]);
+          if(observer.origin!=="https://plc.directory")assertFreshPlcReaderHealth(health,now);
+          const checked=await validatePlcAudit(manifest.did,audit),service=checked.state.services.hail;
           const cids=await Promise.all(checked.log.map(async operation=>(await cidForCbor(operation)).toString()));
           const checkpoint=cids.indexOf(report.bootstrap_cid!);
           const bootstrapState=checkpoint<0||checkpoint===checked.log.length-1?null:
@@ -91,15 +90,16 @@ export class PortableCutoverGate {
           const data=checked.state as {rotationKeys:string[];alsoKnownAs:string[]};
           const recorded=manifest.tables.plc_operation_evidence.at(-1)?.expected_state;
           const before=(typeof recorded==="string"?parseJsonWithoutDuplicateKeys(recorded):recorded) as {alsoKnownAs?:unknown}|undefined;
-          if(resolved.did!==manifest.did||resolved.serviceBase!==manifest.destinationServiceBase||
-            resolved.messagingDidKey!==manifest.destinationMessagingPublicKey||resolved.identityDidKey!==custody.user_identity_public_key||
+          if(service?.type!=="HailMessaging"||service.endpoint!==manifest.destinationServiceBase||
+            checked.state.verificationMethods["hail-messaging"]!==manifest.destinationMessagingPublicKey||
+            checked.state.verificationMethods["hail-identity"]!==custody.user_identity_public_key||
             data.rotationKeys[0]!==custody.user_recovery_public_key||!data.rotationKeys.slice(1).includes(manifest.destinationRotationPublicKey)||
             data.rotationKeys.some(key=>manifest.tables.account_keys.some(entry=>entry.role==="plc-rotation"&&entry.public_key===key))||
             !before||!isDeepStrictEqual(data.alsoKnownAs,before.alsoKnownAs))
             throw new Error("Reader does not confirm the exact portable destination state");
           if(report.operation_cid!==checked.operationCid||checked.operationCid!==expectedCid)
             throw new Error("Reader does not confirm the exact user-authorized PLC operation");
-          return {observer,checked,document:structuredClone(resolved.evidence.document),bootstrapState};
+          return {observer,checked,document:formatDidDoc(checked.state),bootstrapState};
         })(),AbortSignal.timeout(Math.min(5_000,Math.max(1,Math.floor(remaining/(this.observers.length-index))))));
         break;
       }catch(error){failures.push(error);}

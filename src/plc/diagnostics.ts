@@ -1,6 +1,6 @@
 import {isDeepStrictEqual} from "node:util";
 import {assertFreshPlcReaderHealth,type IndependentPlcObserver} from "./observers.js";
-import {validatePlcReadEvidence} from "./read-evidence.js";
+import {validatePlcAudit} from "./read-evidence.js";
 
 export interface PlcReaderDiagnostic {
   healthy:boolean;
@@ -13,12 +13,10 @@ export async function inspectPlcReaders(readers:readonly IndependentPlcObserver[
   const observations=await Promise.all(readers.map(async reader=>{
     const identity={origin:reader.origin,...(reader.operator?{operator:reader.operator}:{})};
     try{
-      if(!reader.health)throw new Error("Reader does not expose health");
-      const health=await reader.health();assertFreshPlcReaderHealth(health,now);
+      const health=await reader.health?.();
+      if(reader.origin!=="https://plc.directory")assertFreshPlcReaderHealth(health,now);
       if(!did)return {reader,result:{...identity,healthy:true}};
-      const [resolved,audit]=await Promise.all([reader.resolver.resolve(did),reader.audit(did)]);
-      const checked=await validatePlcReadEvidence(did,resolved.evidence,audit);
-      if(resolved.did!==did)throw new Error("Reader returned another DID");
+      const checked=await validatePlcAudit(did,await reader.audit(did));
       return {reader,checked,result:{...identity,healthy:true,operationCid:checked.operationCid}};
     }catch(error){return {reader,result:{...identity,healthy:false,
       error:error instanceof Error?error.message:"Unknown reader error"}};}
