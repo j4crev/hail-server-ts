@@ -1,10 +1,12 @@
 # Hail Server TypeScript
 
+> [!IMPORTANT]
+> Development has moved to [`hailproto/apps/server`](https://github.com/j4crev/hailproto/tree/main/apps/server). This repository is retained only for historical issues, releases, and links.
+
 Reusable Bun and Hono provider implementation for Hail Protocol.
 
-This repository is under active development. The implementation method,
-security limitations, and deployment procedure are documented in the sibling
-Hail Protocol checkout at
+The implementation method, security limitations, and deployment procedure were
+documented in the sibling Hail Protocol checkout at
 [`../hailproto/docs/typescript-backend-poc.md`](../hailproto/docs/typescript-backend-poc.md).
 
 ## Current alpha and guides
