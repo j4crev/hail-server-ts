@@ -7,23 +7,24 @@ security limitations, and deployment procedure are documented in the sibling
 Hail Protocol checkout at
 [`../hailproto/docs/typescript-backend-poc.md`](../hailproto/docs/typescript-backend-poc.md).
 
-## Current POC and guides
+## Current alpha and guides
 
-The deployed private-PLC POC supports Grant-authorized detached-body delivery,
-signed terminal status, revocation, single-use replies and user-authorized
-provider transfer with pending-message continuity. The October 9 CLI release adds
-private-PLC self-service signup and the account API; provider databases are at
-migration 35, including owner-key recovery, scoped credentials/rotation,
-provider-domain binding renewal and stable-key Grant updates. A separate same-VPS monitor proves signed-alert functionality,
-but is not independent production monitoring.
+The deployed public alpha runs two strict-public providers against canonical
+`plc.directory`. Backed-up owner-controlled canaries at `hailproto.app` and
+`hailproto.dev` have completed monitored onboarding, Sender Profile publication,
+reciprocal Grants and terminally delivered messages in both directions. The
+private-PLC POC remains available for destructive transfer/recovery rehearsals;
+public managed transfer remains disabled. Both alpha providers share one VPS, so
+the deployment proves protocol interoperability rather than infrastructure
+independence.
 
 - [Provider deployment and delivery runbook](deploy/poc/README.md).
 - [User-device vault/signing client](https://github.com/j4crev/hail-user-client-ts#readme).
 - [Transfer/recovery checkpoints](https://github.com/j4crev/hailproto/blob/main/docs/production-portable-custody.md#resuming-a-private-plc-poc-ceremony).
-- [Same-VPS monitor deployment](https://github.com/j4crev/hail-plc-monitor-ts/blob/main/deploy/poc/README.md).
+- [Public monitor deployment](https://github.com/j4crev/hail-plc-monitor-ts/blob/main/deploy/public/README.md).
 
-Original Alice/Bob identities are custodial; only fresh user-key-held POC DIDs
-use the portable ceremony. Public HTTPS activation is not public PLC registration.
+Original private Alice/Bob identities remain historical POC fixtures. The public
+canaries are real `plc.directory` identities and must not be reused as production users.
 
 ## hailp Account API
 
@@ -65,7 +66,7 @@ operator)` and pass the reviewed source/destination operator IDs as the fourth
 `PortableCutoverGate` constructor argument. Legacy v1 monitor reports, private
 registration evidence and private-Poc observation promotion cannot authorize
 public cutover. The private POC path retains its separate gate. Migration 44 adds
-an opt-in public signup route, but no live deployment is enabled by fixture tests. See
+an opt-in public signup route, now exercised by the two live alpha canaries. See
 [verification and remaining gates](https://github.com/j4crev/hail-user-client-ts/blob/main/docs/milestone7-production-gate.md#read-evidence-and-monitor-bootstrap-slice).
 
 Migration **40** adds full immutable public cutover evidence and a separate
@@ -153,6 +154,8 @@ federation operations:
 | Operation | Scope | Result |
 | --- | --- | --- |
 | `GET /api/v1/account` | `account:read` | Own account/DID/address, custody classification, public identity/recovery metadata, migration state and scopes |
+| `GET /api/v1/account/profile` | `account:read` | Current signed Sender Profile revision, digest and exact COSE bytes |
+| `POST /api/v1/account/profile` | `account:write` | Idempotently create or optimistic-revision update an explicit Sender Profile definition |
 | `GET /api/v1/account/grants/{grant_id}` | `grants:read` | Own authoritative or received Grant, local role, exact base64url COSE bytes, digest and ETag; the CLI renders diagnostic JSON locally |
 | `PUT /api/v1/account/grants/{grant_id}` | `grants:write` | Verify/store an initial or terminal user-signed Grant; JSON acknowledgement of revision/status/digest and durable publication responsibility |
 
