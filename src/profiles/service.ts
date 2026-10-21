@@ -34,6 +34,27 @@ export interface SenderProfileRepository {
   ): Promise<void>;
 }
 
+export class SenderProfileConflictError extends Error {}
+
+export function parseSenderProfileDefinition(value: unknown): SenderProfileDefinition {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Sender Profile definition must be an object");
+  const record = value as Record<string, unknown>,allowed=["display_name","description","offers_uncategorized","categories"];
+  if(Object.keys(record).some(key=>!allowed.includes(key))||typeof record.display_name!=="string"||
+    record.description!==undefined&&typeof record.description!=="string"||typeof record.offers_uncategorized!=="boolean"||
+    !Array.isArray(record.categories))throw new Error("Sender Profile definition has an invalid shape");
+  const categories=record.categories.map(value=>{
+    if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Sender Profile category must be an object");
+    const category=value as Record<string,unknown>;
+    if(Object.keys(category).some(key=>!["id","label","description"].includes(key))||typeof category.id!=="string"||
+      typeof category.label!=="string"||category.description!==undefined&&typeof category.description!=="string")
+      throw new Error("Sender Profile category has an invalid shape");
+    return category.description===undefined?{id:category.id,label:category.label}:
+      {id:category.id,label:category.label,description:category.description};
+  });
+  return record.description===undefined?{display_name:record.display_name,offers_uncategorized:record.offers_uncategorized,categories}:
+    {display_name:record.display_name,description:record.description,offers_uncategorized:record.offers_uncategorized,categories};
+}
+
 function normalizedDefinition(definition: SenderProfileDefinition): SenderProfileDefinition {
   const categories = definition.categories
     .map((category) =>
@@ -87,6 +108,7 @@ export class SenderProfileService {
   async createOrReuse(
     addressInput: string,
     inputDefinition: SenderProfileDefinition,
+    expectedPreviousRevision?: number,
   ): Promise<StoredSenderProfile> {
     const address = canonicalizeHailAddress(addressInput);
     const account = await this.repository.getAccountByAddress(address);
@@ -106,6 +128,8 @@ export class SenderProfileService {
     const definition = normalizedDefinition(inputDefinition);
     const latest = await this.repository.getLatestSenderProfile(account.id);
     if (latest && matchesDefinition(latest, definition, key.publicKey)) return latest;
+    if(expectedPreviousRevision!==undefined&&expectedPreviousRevision!==(latest?.revision??0))
+      throw new SenderProfileConflictError("Sender Profile revision changed");
 
     const instant = this.now();
     const current = Math.floor(instant.getTime() / 1_000);
@@ -176,5 +200,11 @@ export class SenderProfileService {
       if (winner && matchesDefinition(winner, definition, key.publicKey)) return winner;
       throw error;
     }
+  }
+
+  async getLatest(addressInput:string):Promise<StoredSenderProfile|null>{
+    const account=await this.repository.getAccountByAddress(canonicalizeHailAddress(addressInput));
+    if(account.state!=="active")throw new Error("Account must be active before reading a Sender Profile");
+    return this.repository.getLatestSenderProfile(account.id);
   }
 }

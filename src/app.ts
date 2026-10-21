@@ -43,6 +43,7 @@ import type { ManagedMigrationFenceService } from "./migration/managed-fence.js"
 import type { ManagedAccountTransfer } from "./accounts/managed-transfer.js";
 import type {ManagedMigrationCompletion} from "./migration/managed-completion.js";
 import {withFreshServingGenerations} from "./db/serving.js";
+import type {SenderProfileService} from "./profiles/service.js";
 
 export interface ReadinessResult {
   ready: boolean;
@@ -72,7 +73,8 @@ export interface AppDependencies {
   managedMigrationFence?:ManagedMigrationFenceService;
   managedMigrationCompletion?:ManagedMigrationCompletion;
   accountApi?: { accounts: AccountApiRepository; grants: GrantRepository; service: GrantService; messaging?:AccountMessaging;
-    binding?:AccountBinding;transfer?:AccountTransfer;custodyTransition?:SameProviderCustodyTransition;managedTransfer?:ManagedAccountTransfer };
+    binding?:AccountBinding;transfer?:AccountTransfer;custodyTransition?:SameProviderCustodyTransition;managedTransfer?:ManagedAccountTransfer;
+    profiles?:SenderProfileService };
   selfServiceOnboarding?: SelfServiceOnboarding;
   accountAccess?: { access: AccountAccess; sql: SQL };
   servingSql?:SQL;
@@ -95,8 +97,8 @@ export function createApp(
   if (dependencies.accountAccess) registerAccountAccess(app, dependencies.accountAccess.access, dependencies.accountAccess.sql);
 
   if (dependencies.accountApi) {
-    const { accounts, grants, service, messaging, binding,transfer,custodyTransition,managedTransfer } = dependencies.accountApi;
-    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding,transfer,custodyTransition,managedTransfer);
+    const { accounts, grants, service, messaging, binding,transfer,custodyTransition,managedTransfer,profiles } = dependencies.accountApi;
+    registerAccountApiRoutes(app, accounts, grants, service, config.publicOrigin,messaging,binding,transfer,custodyTransition,managedTransfer,profiles);
   }
 
   if (dependencies.discoveryStore) {

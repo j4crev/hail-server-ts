@@ -5,6 +5,8 @@ import { KeyEncryptor } from "../src/identity/key-encryption.js";
 import { generateAccountKeys } from "../src/identity/keys.js";
 import type { AccountRecord } from "../src/onboarding/repository.js";
 import {
+  parseSenderProfileDefinition,
+  SenderProfileConflictError,
   SenderProfileService,
   type SenderProfileRepository,
 } from "../src/profiles/service.js";
@@ -100,15 +102,25 @@ describe("SenderProfileService", () => {
       display_name: "Alice",
       offers_uncategorized: false,
       categories: [],
-    });
+    },0);
+    await expect(service.createOrReuse("alice@hailproto.app", {
+      display_name:"Alice Updated",offers_uncategorized:false,categories:[],
+    },0)).rejects.toBeInstanceOf(SenderProfileConflictError);
     const second = await service.createOrReuse("alice@hailproto.app", {
       display_name: "Alice Updated",
       offers_uncategorized: false,
       categories: [],
-    });
+    },1);
 
     expect(second.revision).toBe(2);
     expect(second.updatedAt).toBe(first.updatedAt + 1);
+    expect(await service.getLatest("alice@hailproto.app")).toBe(second);
+  });
+
+  it("strictly parses profile definitions",()=>{
+    expect(parseSenderProfileDefinition({display_name:"Alice",offers_uncategorized:false,
+      categories:[{id:"updates",label:"Updates"}]}).categories).toHaveLength(1);
+    expect(()=>parseSenderProfileDefinition({display_name:"Alice",offers_uncategorized:false,categories:[],extra:true})).toThrow("invalid shape");
   });
 
   it("refuses to sign when current PLC state names another messaging key", async () => {

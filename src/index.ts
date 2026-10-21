@@ -69,6 +69,7 @@ import {ManagedMigrationCompletion} from "./migration/managed-completion.js";
 import {createPublicManagedRuntime} from "./migration/public-managed-runtime.js";
 import {createIndependentPlcObserver} from "./plc/observers.js";
 import {inspectPlcReaders} from "./plc/diagnostics.js";
+import {SenderProfileService} from "./profiles/service.js";
 
 const config = loadConfig();
 const database = new ProviderDatabase(config.databaseUrl);
@@ -269,6 +270,7 @@ const app = createApp(config, schemaRehearsal ? {
       new EnvelopeService(onboardingRepository,grantRepository,new EnvelopeRepository(database.sql),new KeyEncryptor(config.keyEncryptionKey),resolver,config.hailServiceBase),
       (sender,id)=>submitEnvelope(sender,id,new EnvelopeRepository(database.sql),resolver,
         new DeliveryStatusReceiver(database.sql,onboardingRepository,resolver,config.hailServiceBase),transport)),
+    profiles:new SenderProfileService(onboardingRepository,new KeyEncryptor(config.keyEncryptionKey),resolver,config.hailServiceBase),
     service: new GrantService(onboardingRepository, grantRepository, new KeyEncryptor(config.keyEncryptionKey),
        resolver, new AddressVerifier(plc, transport.fetch, transport.validateTarget,undefined,resolver),
       new SenderProfileVerifier(resolver, transport.fetch, transport.validateTarget, undefined, onboardingRepository),

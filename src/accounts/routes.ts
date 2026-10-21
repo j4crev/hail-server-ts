@@ -11,6 +11,7 @@ import { AccountTransferError,type AccountTransfer } from "./transfer.js";
 import {withServingGeneration} from "../db/serving.js";
 import type { SameProviderCustodyTransition } from "./custody-transition.js";
 import type { ManagedAccountTransfer } from "./managed-transfer.js";
+import { parseSenderProfileDefinition, SenderProfileConflictError, type SenderProfileService } from "../profiles/service.js";
 
 const GRANT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_BYTES = 262_144;
@@ -40,7 +41,8 @@ export async function accountRequestBytes(request: Request,limit=MAX_BYTES): Pro
 
 export function registerAccountApiRoutes(app: Hono, accounts: AccountApiRepository,
   grants: GrantRepository, service: GrantService, provider: string, messaging?:AccountMessaging, binding?:AccountBinding,
-  transfer?:AccountTransfer,custodyTransition?:SameProviderCustodyTransition,managedTransfer?:ManagedAccountTransfer): void {
+  transfer?:AccountTransfer,custodyTransition?:SameProviderCustodyTransition,managedTransfer?:ManagedAccountTransfer,
+  profiles?:SenderProfileService): void {
   let window = Date.now();
   let requests = 0;
   const handle = async (context: Context, grantId: string | null, action?: string):Promise<Response> => {
@@ -171,6 +173,29 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
           if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Invalid object");}catch{return problem(400);}
         return context.json(await binding.renew(session,input));
       }
+      if(action==="profile") {
+        if(!session.scopes.includes(method==="GET"?"account:read":"account:write"))return problem(403);
+        if(!profiles)return problem(503);
+        if(method==="GET"){
+          const current=await profiles.getLatest(session.canonical_address);if(!current)return problem(404);
+          return context.json({type:"hailp.sender-profile",version:1,revision:current.revision,
+            digest:encodeBase64Url(current.digest),cose:encodeBase64Url(current.cose),
+            profile:toDiagnosticJson("hail.sender-profile",current.payload)});
+        }
+        if(method!=="POST")return problem(405);if(session.migration_state)return problem(409);
+        if(context.req.header("Content-Type")!=="application/json"||context.req.header("Content-Encoding")!==undefined)return problem(415);
+        const bytes=await accountRequestBytes(context.req.raw,16384);if(!bytes)return problem(413);
+        let input:Record<string,unknown>,definition;
+        try{input=parseJsonWithoutDuplicateKeys(new TextDecoder("utf-8",{fatal:true}).decode(bytes)) as Record<string,unknown>;
+          if(!input||typeof input!=="object"||Array.isArray(input)||Object.keys(input).length!==2||
+            !Number.isSafeInteger(input.expectedRevision)||Number(input.expectedRevision)<0)throw new Error("Invalid profile request");
+          definition=parseSenderProfileDefinition(input.definition);
+        }catch{return problem(400);}
+        const saved=await profiles.createOrReuse(session.canonical_address,definition,Number(input.expectedRevision));
+        return context.json({type:"hailp.sender-profile",version:1,revision:saved.revision,
+          digest:encodeBase64Url(saved.digest),cose:encodeBase64Url(saved.cose),
+          profile:toDiagnosticJson("hail.sender-profile",saved.payload)});
+      }
       const scope = action === "send" || action === "resubmit" ? "messages:write" : ["inbox","read","status"].includes(action ?? "") ? "messages:read" : action === "credential" ? "credentials:write" : action === "proposal" || action === "managed-create" || action === "managed-revoke" ? "grants:write" : action === "list" ? "grants:read" :
         grantId === null ? "account:read" : method === "PUT" ? "grants:write" : "grants:read";
       if (!session.scopes.includes(scope)) return problem(403);
@@ -298,6 +323,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
       if (error instanceof UserGrantError) return problem(error.status);
       if (error instanceof BindingError) return problem(error.status);
       if (error instanceof AccountTransferError) return problem(error.status);
+      if(error instanceof SenderProfileConflictError)return problem(409);
       if (error instanceof HailCodecError || error instanceof SyntaxError) return problem(400);
       if (error instanceof CredentialConflictError || error instanceof GrantConflictError || error instanceof Error &&
         ("code" in error && error.code === "55000" || "errno" in error && error.errno === "55000")) {
@@ -320,6 +346,7 @@ export function registerAccountApiRoutes(app: Hono, accounts: AccountApiReposito
   app.all("/api/v1/account/custody/owner-controlled",context=>handle(context,null,"custody-prepare-owner"));
   app.all("/api/v1/account/custody/managed/commit",context=>handle(context,null,"custody-commit"));
   app.all("/api/v1/account/binding",context=>handle(context,null,"binding"));
+  app.all("/api/v1/account/profile",context=>handle(context,null,"profile"));
   app.all("/api/v1/account/messages",context=>handle(context,null,"send"));
   app.all("/api/v1/account/inbox",context=>handle(context,null,"inbox"));
   app.all("/api/v1/account/inbox/:sender/:messageId",context=>handle(context,context.req.param("messageId"),"read"));
